@@ -1,0 +1,35 @@
+#!/usr/bin/env zsh
+
+repo_root=$(git worktree list 2>/dev/null | head -n 1 | awk '{print $1}')
+if [[ -z "$repo_root" ]]; then
+    echo "Error: not in a git repository" >&2
+    exit 1
+fi
+
+migrated=0
+
+if [[ -f "${repo_root}/.gw-sync-files" ]]; then
+    if [[ ! -f "${repo_root}/.gw/config" ]]; then
+        mkdir -p "${repo_root}/.gw"
+        mv "${repo_root}/.gw-sync-files" "${repo_root}/.gw/config"
+        echo "Migrated: .gw-sync-files → .gw/config"
+        (( migrated++ ))
+    else
+        echo "Skip: .gw/config already exists"
+    fi
+fi
+
+if [[ -f "${repo_root}/.gw-post-create" ]]; then
+    if [[ ! -f "${repo_root}/.gw/hooks/post-create" ]]; then
+        mkdir -p "${repo_root}/.gw/hooks"
+        mv "${repo_root}/.gw-post-create" "${repo_root}/.gw/hooks/post-create"
+        echo "Migrated: .gw-post-create → .gw/hooks/post-create"
+        (( migrated++ ))
+    else
+        echo "Skip: .gw/hooks/post-create already exists"
+    fi
+fi
+
+if (( migrated == 0 )); then
+    echo "Nothing to migrate"
+fi

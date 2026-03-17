@@ -1,0 +1,7 @@
+#!/usr/bin/env zsh
+# Claude Code: trust a directory
+dir="${1:A}"
+config=~/.claude.json
+[ -f "$config" ] || exit 0
+tmp="${config}.tmp.$$"
+jq --arg path "$dir" '.projects[$path].hasTrustDialogAccepted = true' "$config" > "$tmp" && mv "$tmp" "$config"

@@ -1,0 +1,1007 @@
+#!/bin/zsh
+
+# Git worktree management function
+# gw - Git Worktree helper for efficient branch-based development
+
+# ─── Helpers ───────────────────────────────────────────────
+
+# Get the main (first) worktree path
+function _gw_main_repo_path() {
+    git worktree list | head -n 1 | awk '{print $1}'
+}
+
+# Shorten task name for worktree path
+function _gw_shorten_name() {
+    local name="$1"
+    local shortened="${name//\//-}"
+    if [ ${#shortened} -gt 20 ]; then
+        shortened="${shortened:0:18}__"
+    fi
+    echo "$shortened"
+}
+
+# Get worktree path for a task
+function _gw_get_worktree_path() {
+    local task_name="$1"
+    local main_repo_path=$(_gw_main_repo_path)
+    local repo_name=$(basename "$main_repo_path")
+    local parent_dir=$(dirname "$main_repo_path")
+
+    if [ -z "$task_name" ] || [ "$task_name" = "main" ]; then
+        echo "$main_repo_path"
+    else
+        local shortened_name=$(_gw_shorten_name "$task_name")
+        local wt_dir="${parent_dir}/${repo_name}-wt"
+        mkdir -p "$wt_dir"
+        echo "${wt_dir}/${shortened_name}"
+    fi
+}
+
+# Get metadata file path for a worktree
+function _gw_get_metadata_path() {
+    local worktree_path="$1"
+    local main_repo_path=$(_gw_main_repo_path)
+    local worktree_name=$(basename "$worktree_path")
+    echo "${main_repo_path}/.git/worktrees/${worktree_name}/gw_metadata"
+}
+
+# Get value from metadata
+function _gw_get_value() {
+    local worktree_path="$1"
+    local key="$2"
+    local metadata_path=$(_gw_get_metadata_path "$worktree_path")
+    if [ -f "$metadata_path" ]; then
+        grep "^${key}=" "$metadata_path" 2>/dev/null | cut -d= -f2-
+    fi
+}
+
+# Set value in metadata
+function _gw_set_value() {
+    local worktree_path="$1"
+    local key="$2"
+    local value="$3"
+    local metadata_path=$(_gw_get_metadata_path "$worktree_path")
+
+    if [ -f "$metadata_path" ]; then
+        local tmp=$(grep -v "^${key}=" "$metadata_path" 2>/dev/null || true)
+        if [ -n "$tmp" ]; then
+            echo "$tmp" > "$metadata_path"
+        else
+            : > "$metadata_path"
+        fi
+    fi
+    echo "${key}=${value}" >> "$metadata_path"
+}
+
+# Get description for a worktree (wrapper)
+function _gw_get_description() {
+    local worktree_path="$1"
+    _gw_get_value "$worktree_path" "purpose"
+}
+
+# Generate a short label for a worktree
+function _gw_make_label() {
+    local wt_path="$1"
+    local repo_name="$2"
+    local dir_name=$(basename "$wt_path")
+    local parent_name=$(basename "$(dirname "$wt_path")")
+
+    if [[ "$parent_name" == "${repo_name}-wt" ]]; then
+        echo "$dir_name"
+    elif [[ "$dir_name" == "$repo_name" ]]; then
+        echo "main"
+    else
+        echo "$dir_name"
+    fi
+}
+
+# Return all worktrees sorted by most recent commit as lines: path\tbranch\tage\ttimestamp
+function _gw_sorted_worktrees() {
+    local -a entries=()
+    local lines=(${(f)"$(git worktree list)"})
+    local wt_path branch ts age log_output
+    for line in "${lines[@]}"; do
+        wt_path=$(echo "$line" | awk '{print $1}')
+        branch=$(echo "$line" | awk '{print $3}')
+        log_output=$(git -C "$wt_path" log -1 --format='%ct %cr' 2>/dev/null)
+        ts="${log_output%% *}"
+        age="${log_output#* }"
+        age="${age% ago}"
+        entries+=("${ts:-0}"$'\t'"${wt_path}"$'\t'"${branch}"$'\t'"${age}"$'\t'"${ts:-0}")
+    done
+    printf '%s\n' "${entries[@]}" | sort -rnk1 -t $'\t' | cut -d $'\t' -f2-
+}
+
+# Resolve worktree path from query using git worktree list
+function _gw_resolve_worktree() {
+    local query="$1"
+    local main_repo_path=$(_gw_main_repo_path)
+    local repo_name=$(basename "$main_repo_path")
+
+    if [ -z "$query" ] || [ "$query" = "main" ]; then
+        echo "$main_repo_path"
+        return 0
+    fi
+
+    local worktree_paths=(${(f)"$(git worktree list | awk '{print $1}')"})
+    local dir_name parent_name q
+    for wt_path in "${worktree_paths[@]}"; do
+        dir_name=$(basename "$wt_path")
+        parent_name=$(basename "$(dirname "$wt_path")")
+
+        # Exact match: basename matches query
+        if [ "$dir_name" = "$query" ]; then
+            echo "$wt_path"
+            return 0
+        fi
+        # Task worktree: parent is ${repo_name}-wt and basename matches query
+        if [ "$parent_name" = "${repo_name}-wt" ] && [ "$dir_name" = "$query" ]; then
+            echo "$wt_path"
+            return 0
+        fi
+        # PR worktree: parent is ${repo_name}-wt and basename is PR-${number}
+        # Match PR-123, #123, or 123
+        q="${query#PR-}"
+        q="${q#\#}"
+        if [ "$parent_name" = "${repo_name}-wt" ] && [ "$dir_name" = "PR-${q}" ]; then
+            echo "$wt_path"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Extract PR number from URL or number
+function _gw_extract_pr_number() {
+    local input="$1"
+    # URL: https://github.com/owner/repo/pull/123
+    if [[ "$input" =~ ^https://github\.com/.+/pull/([0-9]+) ]]; then
+        echo "${match[1]}"
+    # #123 format
+    elif [[ "$input" =~ ^#([0-9]+)$ ]]; then
+        echo "${match[1]}"
+    # Number only
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        echo "$input"
+    else
+        return 1
+    fi
+}
+
+# Run a hook script with common GW_* environment variables
+# Usage: _gw_run_hook <hook_path> <subcommand> <worktree_path> <main_repo_path> [KEY=val ...] -- [hook args...]
+function _gw_run_hook() {
+    local hook_path="$1"
+    local subcommand="$2"
+    local worktree_path="$3"
+    local main_repo_path="$4"
+    shift 4
+    [ -x "$hook_path" ] || return 0
+
+    local -a extra_env=() hook_args=()
+    local found_sep=false
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--" ]]; then
+            found_sep=true
+            continue
+        fi
+        if $found_sep; then
+            hook_args+=("$arg")
+        else
+            extra_env+=("$arg")
+        fi
+    done
+
+    local hook_name=$(basename "$hook_path")
+    echo "=== Running .gw/hooks/${hook_name} ==="
+    env \
+        GW_SUBCOMMAND="$subcommand" \
+        GW_TASK_NAME="$(basename "$worktree_path")" \
+        GW_WORKTREE_PATH="$worktree_path" \
+        GW_MAIN_REPO="$main_repo_path" \
+        GW_DESCRIPTION="$(_gw_get_description "$worktree_path")" \
+        "${extra_env[@]}" \
+        "$hook_path" "${hook_args[@]}" || return 1
+    echo "=== Done .gw/hooks/${hook_name} ==="
+}
+
+# Sync files listed in .gw/config from source to destination
+function _gw_sync_files() {
+    local from="$1"
+    local to="$2"
+    local sync_file="${from}/.gw/config"
+
+    if [ ! -f "$sync_file" ]; then
+        echo "No .gw/config found"
+        return 0
+    fi
+
+    local file
+
+    # copy
+    for file in ${(f)"$(awk '/^copy:/ { sub(/^copy:[[:space:]]*/, ""); print }' "$sync_file")"}; do
+        if [ ! -e "${from}/${file}" ]; then
+            echo "[SKIP] copy: ${file} (source not found)"
+            continue
+        fi
+        if [ -e "${to}/${file}" ]; then
+            echo "[SKIP] copy: ${file} (already exists)"
+            continue
+        fi
+        mkdir -p "$(dirname "${to}/${file}")"
+        if ! cp "${from}/${file}" "${to}/${file}"; then
+            echo "Error: failed to copy '${file}'"
+            return 1
+        fi
+        echo "[DONE] copy: ${file}"
+    done
+
+    # symlink
+    for file in ${(f)"$(awk '/^symlink:/ { sub(/^symlink:[[:space:]]*/, ""); print }' "$sync_file")"}; do
+        if [ ! -e "${from}/${file}" ]; then
+            echo "[SKIP] symlink: ${file} (source not found)"
+            continue
+        fi
+        if { [ -L "${to}/${file}" ] || [ -e "${to}/${file}" ]; }; then
+            echo "[SKIP] symlink: ${file} (already exists)"
+            continue
+        fi
+        mkdir -p "$(dirname "${to}/${file}")"
+        if ! ln -s "${from}/${file}" "${to}/${file}"; then
+            echo "Error: failed to symlink '${file}'"
+            return 1
+        fi
+        echo "[DONE] symlink: ${file}"
+    done
+}
+
+# Set up a new worktree (sync files, run hooks, write metadata)
+function _gw_setup_worktree() {
+    local worktree_path="$1"
+    shift
+    local main_repo_path=$(_gw_main_repo_path)
+
+    if ! _gw_sync_files "$main_repo_path" "$worktree_path"; then
+        return 1
+    fi
+
+    local key value
+    for kv in "$@"; do
+        key="${kv%%=*}"
+        value="${kv#*=}"
+        if ! _gw_set_value "$worktree_path" "$key" "$value"; then
+            echo "Error: failed to write metadata key '${key}'"
+            return 1
+        fi
+    done
+
+    _gw_run_hook "${main_repo_path}/.gw/hooks/post-create" create "$worktree_path" "$main_repo_path" \
+        -- "$worktree_path" || return 1
+
+    cd "$worktree_path"
+}
+
+# Format worktree info line
+# Args: worktree_path branch label [show_branch]
+function _gw_format_worktree_line() {
+    local worktree_path="$1"
+    local branch="$2"
+    local label="$3"
+    local show_branch="${4:-auto}"
+    local mode="${5:-normal}"
+    local age="${6:-}"
+
+    local purpose=$(_gw_get_description "$worktree_path")
+    if [[ -z "$age" ]]; then
+        age=$(git -C "$worktree_path" log -1 --format='%cr' 2>/dev/null)
+        age="${age% ago}"
+    fi
+
+    local branch_name="${branch#\[}"
+    branch_name="${branch_name%\]}"
+    local original_branch=$(_gw_get_value "$worktree_path" "original_branch")
+
+    local left="${label}"
+    [[ -n "$age" ]] && left="${label} (${age})"
+
+    local right=""
+    if [[ "$label" == "main" ]] && [[ "$branch_name" == "main" ]]; then
+        :
+    elif [[ -n "$original_branch" ]] && [[ "$branch_name" == "$original_branch" ]]; then
+        :
+    elif [[ "$label" == "$branch_name" ]]; then
+        :
+    elif [ "$show_branch" = "always" ] || [ "$show_branch" = "auto" ]; then
+        right="${branch}"
+    fi
+
+    [[ -n "$purpose" ]] && right="${right:+${right} }${purpose}"
+
+    if [[ "$mode" == "verbose" ]]; then
+        right="${right:+${right} }${worktree_path}"
+    fi
+
+    if [[ -n "$right" ]]; then
+        printf '%s\t%s\n' "$left" "$right"
+    else
+        printf '%s\n' "$left"
+    fi
+}
+
+# Remove single worktree (internal)
+function _gw_remove_single() {
+    local worktree_path="$1"
+    local confirm_current="$2"
+    local has_force="$3"
+    local main_repo_path="$4"
+    local response remove_opts=() status_output current_branch
+
+    if [[ ! -d "$worktree_path" ]]; then
+        echo "Error: worktree '$worktree_path' does not exist"
+        return 1
+    fi
+
+    if [[ "$confirm_current" == "true" ]]; then
+        echo -n "Delete current worktree '$worktree_path'? [y/N]: "
+        read -r response
+        case "$response" in
+            [Yy]|[Yy][Ee][Ss]) ;;
+            *)
+                echo "Aborted"
+                return 1
+                ;;
+        esac
+    fi
+
+    if [[ "$has_force" == "true" ]]; then
+        remove_opts+=("--force")
+    else
+        status_output=$(git -C "$worktree_path" status -sb 2>/dev/null)
+        if echo "$status_output" | grep -q "^[^#].*[AMD??]"; then
+            echo "Worktree contains untracked or modified files: $worktree_path"
+            echo "$status_output"
+            echo ""
+            echo -n "Delete anyway? [y/N]: "
+            read -r response
+            case "$response" in
+                [Yy]|[Yy][Ee][Ss]) remove_opts+=("--force") ;;
+                *)
+                    echo "Skipped: $worktree_path"
+                    return 1
+                    ;;
+            esac
+        fi
+    fi
+
+    _gw_run_hook "${main_repo_path}/.gw/hooks/pre-remove" remove "$worktree_path" "$main_repo_path" \
+        -- "$worktree_path" || return 1
+
+    current_branch=$(git -C "$worktree_path" branch --show-current 2>/dev/null)
+
+    cd "$main_repo_path"
+
+    if ! git worktree remove "${remove_opts[@]}" "$worktree_path"; then
+        echo "Error: failed to remove worktree: $worktree_path"
+        return 1
+    fi
+
+    echo "Worktree removed: $worktree_path"
+
+    if [[ -n "$current_branch" && "$current_branch" != "main" && "$current_branch" != "master" ]]; then
+        if git branch -D "$current_branch" 2>/dev/null; then
+            echo "Branch deleted: $current_branch"
+        else
+            echo "Note: branch '$current_branch' was not deleted (may be in use elsewhere)"
+        fi
+    fi
+}
+
+# ─── Subcommands ───────────────────────────────────────────
+
+# Create new worktree
+function _gw_create() {
+    local description=""
+    if [[ "$1" == "-p" ]]; then
+        description="$2"
+        shift 2
+    fi
+
+    local task_name="$1"
+    if [ -z "$task_name" ]; then
+        echo "Error: task name is required"
+        return 1
+    fi
+
+    if [ -z "$description" ]; then
+        vared -p "Enter purpose (optional): " description
+    fi
+
+    local branch_name="$task_name"
+
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "Error: not a git repository"
+        return 1
+    fi
+
+    # Check if local branch already exists
+    local local_branch_exists=false
+    if git show-ref --verify --quiet "refs/heads/${branch_name}"; then
+        local_branch_exists=true
+    fi
+
+    local worktree_path=$(_gw_get_worktree_path "$branch_name")
+    local main_repo_path=$(_gw_main_repo_path)
+
+    if [ -d "$worktree_path" ]; then
+        echo "Worktree already exists. Moving to: $worktree_path"
+        cd "$worktree_path"
+        return 0
+    fi
+
+    # Check if remote branch exists
+    local remote_exists=false
+    if git ls-remote --heads origin "$branch_name" | grep -q "refs/heads/${branch_name}$"; then
+        remote_exists=true
+    fi
+
+    if [ "$local_branch_exists" = true ]; then
+        echo "Creating worktree from existing local branch '$branch_name'."
+    elif [ "$remote_exists" = true ]; then
+        echo "Remote branch '$branch_name' found. Creating worktree from remote branch."
+    else
+        echo "Creating worktree with new branch '$branch_name'."
+    fi
+
+    echo "Updating local main branch..."
+    local main_checked_out=$(cd "$main_repo_path" && git branch --show-current)
+    if [ "$main_checked_out" = "main" ]; then
+        if ! (cd "$main_repo_path" && git pull origin main); then
+            echo "Error: failed to update local main"
+            return 1
+        fi
+    else
+        if ! (cd "$main_repo_path" && git fetch origin main:main); then
+            echo "Error: failed to update local main"
+            return 1
+        fi
+    fi
+
+    if [ "$remote_exists" = true ] && [ "$local_branch_exists" = false ]; then
+        echo "Fetching remote branch..."
+        if ! (cd "$main_repo_path" && git fetch origin "$branch_name"); then
+            echo "Error: failed to fetch branch '$branch_name'"
+            return 1
+        fi
+    fi
+
+    echo "Creating worktree: $worktree_path"
+    if [ "$local_branch_exists" = true ] || [ "$remote_exists" = true ]; then
+        if ! git worktree add "$worktree_path" "$branch_name"; then
+            return 1
+        fi
+    else
+        if ! git worktree add -b "$branch_name" "$worktree_path" main; then
+            return 1
+        fi
+    fi
+
+    local setup_args=("$worktree_path" "original_branch=${branch_name}")
+    [[ -n "$description" ]] && setup_args+=("purpose=${description}")
+    if ! _gw_setup_worktree "${setup_args[@]}"; then
+        echo "Error: worktree created but setup failed"
+        return 1
+    fi
+    echo "Worktree created and switched to: $worktree_path"
+}
+
+# List worktrees
+function _gw_list() {
+    local mode="normal"
+    case "$1" in
+        --path) mode="path" ;;
+        -v) mode="verbose" ;;
+    esac
+    local main_repo_path
+    main_repo_path=$(_gw_main_repo_path)
+    local repo_name=$(basename "$main_repo_path")
+
+    local sorted_lines=(${(f)"$(_gw_sorted_worktrees)"})
+    local worktree_path wt_br wt_age label left
+    for line in "${sorted_lines[@]}"; do
+        IFS=$'\t' read -r worktree_path wt_br wt_age _ <<< "$line"
+        label=$(_gw_make_label "$worktree_path" "$repo_name")
+        if [[ "$mode" == "path" ]]; then
+            left="${label}"
+            [[ -n "$wt_age" ]] && left="${label} (${wt_age})"
+            printf '%s\t%s\n' "$left" "$worktree_path"
+        else
+            _gw_format_worktree_line "$worktree_path" "$wt_br" "$label" "auto" "$mode" "$wt_age"
+        fi
+    done
+}
+
+# Remove worktree
+function _gw_remove() {
+    local main_repo_path
+    main_repo_path=$(_gw_main_repo_path)
+    local current_path
+    current_path=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local opts=() task_names=() worktree_paths=()
+    local arg wt_path has_force=false confirm_current
+    local current_wt_index i current_wt failed
+
+    for arg in "$@"; do
+        case "$arg" in
+            -*) opts+=("$arg") ;;
+            *) task_names+=("$arg") ;;
+        esac
+    done
+
+    for arg in "${opts[@]}"; do
+        if [[ "$arg" == "--force" || "$arg" == "-f" ]]; then
+            has_force=true
+            break
+        fi
+    done
+
+    if [[ ${#task_names[@]} -eq 0 ]]; then
+        if [[ "$current_path" == "$main_repo_path" ]]; then
+            echo "Error: cannot remove main worktree"
+            return 1
+        fi
+        if ! git worktree list | awk '{print $1}' | grep -qxF "$current_path"; then
+            echo "Error: current directory is not a worktree"
+            return 1
+        fi
+        _gw_remove_single "$current_path" true "$has_force" "$main_repo_path"
+        return $?
+    fi
+
+    for arg in "${task_names[@]}"; do
+        wt_path=$(_gw_resolve_worktree "$arg")
+        if [[ $? -ne 0 ]] || [[ -z "$wt_path" ]]; then
+            echo "Error: worktree '$arg' not found"
+            return 1
+        fi
+        if [[ "$wt_path" == "$main_repo_path" ]]; then
+            echo "Error: cannot remove main worktree: $arg"
+            return 1
+        fi
+        worktree_paths+=("$wt_path")
+    done
+
+    current_wt_index=-1
+    i=1
+    for wt_path in "${worktree_paths[@]}"; do
+        if [[ "$wt_path" == "$current_path" ]]; then
+            current_wt_index=$i
+            break
+        fi
+        (( i++ ))
+    done
+
+    if [[ $current_wt_index -ge 1 ]]; then
+        current_wt="${worktree_paths[$current_wt_index]}"
+        worktree_paths[$current_wt_index]=()
+        worktree_paths+=("$current_wt")
+    fi
+
+    failed=0
+    for wt_path in "${worktree_paths[@]}"; do
+        confirm_current=false
+        [[ "$wt_path" == "$current_path" ]] && confirm_current=true
+        _gw_remove_single "$wt_path" "$confirm_current" "$has_force" "$main_repo_path" || (( failed++ ))
+    done
+
+    [[ $failed -gt 0 ]] && return 1
+    return 0
+}
+
+# Switch to existing worktree
+function _gw_switch() {
+    local task_name="$1"
+    local current_path=$(pwd)
+
+    if [ "$task_name" = "-" ]; then
+        if [ -z "$GW_PREVIOUS_WORKTREE" ]; then
+            echo "Error: no previous worktree"
+            return 1
+        fi
+        local worktree_path="$GW_PREVIOUS_WORKTREE"
+    else
+        local worktree_path=$(_gw_resolve_worktree "$task_name")
+        if [ $? -ne 0 ] || [ -z "$worktree_path" ]; then
+            echo "Error: worktree '$task_name' not found"
+            return 1
+        fi
+    fi
+
+    if [ ! -d "$worktree_path" ]; then
+        echo "Error: worktree '$worktree_path' does not exist"
+        return 1
+    fi
+
+    export GW_PREVIOUS_WORKTREE="$current_path"
+
+    cd "$worktree_path"
+    echo "Switched to: $worktree_path"
+
+    local description=$(_gw_get_description "$worktree_path")
+    if [ -n "$description" ]; then
+        echo "Purpose: $description"
+    fi
+}
+
+# Create worktree for PR review
+function _gw_review() {
+    local input="$1"
+    if [ -z "$input" ]; then
+        echo "Error: PR number or URL is required"
+        echo "Usage: gw pr <pr-number|url>"
+        return 1
+    fi
+
+    if ! command -v gh &> /dev/null; then
+        echo "Error: gh command not found"
+        return 1
+    fi
+
+    local pr_number=$(_gw_extract_pr_number "$input")
+    if [ -z "$pr_number" ]; then
+        echo "Error: could not extract PR number: $input"
+        return 1
+    fi
+
+    local pr_info
+    pr_info=$(gh pr view "$pr_number" --json number,title,headRefName,url 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error: failed to get PR info"
+        echo "$pr_info"
+        return 1
+    fi
+
+    local pr_title=$(echo "$pr_info" | jq -r '.title')
+    local pr_branch=$(echo "$pr_info" | jq -r '.headRefName')
+    local pr_url=$(echo "$pr_info" | jq -r '.url')
+
+    local main_repo_path=$(_gw_main_repo_path)
+    local repo_name=$(basename "$main_repo_path")
+    local parent_dir=$(dirname "$main_repo_path")
+    local wt_dir="${parent_dir}/${repo_name}-wt"
+    local worktree_path="${wt_dir}/PR-${pr_number}"
+
+    if [ -d "$worktree_path" ]; then
+        echo "Moving to existing worktree: $worktree_path"
+        cd "$worktree_path"
+        return 0
+    fi
+
+    mkdir -p "$wt_dir"
+
+    echo "Fetching PR branch..."
+    if ! (cd "$main_repo_path" && git fetch origin "$pr_branch"); then
+        echo "Error: failed to fetch PR #${pr_number}"
+        return 1
+    fi
+
+    echo "Creating worktree: $worktree_path"
+    if ! (cd "$main_repo_path" && git worktree add "$worktree_path" "$pr_branch"); then
+        echo "Error: failed to create worktree"
+        return 1
+    fi
+
+    if ! _gw_setup_worktree "$worktree_path" \
+        "purpose=#${pr_number}: ${pr_title}" \
+        "original_branch=${pr_branch}" \
+        "pr_number=${pr_number}" \
+        "pr_title=${pr_title}" \
+        "pr_url=${pr_url}"; then
+        echo "Error: worktree created but setup failed"
+        return 1
+    fi
+    echo "Created worktree for PR #${pr_number}: $worktree_path"
+    echo "Title: $pr_title"
+
+    _gw_run_hook "${main_repo_path}/.gw/hooks/post-review" review "$worktree_path" "$main_repo_path" \
+        GW_PR_NUMBER="$pr_number" GW_PR_URL="$pr_url" GW_PR_TITLE="$pr_title" \
+        -- "$worktree_path" "$pr_number" "$pr_url"
+}
+
+# Show or set description for current worktree
+function _gw_describe() {
+    local current_path=$(pwd)
+
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "Error: not a git repository"
+        return 1
+    fi
+
+    if [ "$1" = "--set" ]; then
+        local key_value="$2"
+        if [ -z "$key_value" ]; then
+            echo "Error: --set requires key=value"
+            return 1
+        fi
+
+        local key="${key_value%%=*}"
+        local value="${key_value#*=}"
+
+        case "$key" in
+            purpose|original_branch)
+                if [ -z "$value" ]; then
+                    echo "Error: value is required"
+                    return 1
+                fi
+                if ! _gw_set_value "$current_path" "$key" "$value"; then
+                    echo "Error: failed to set ${key}"
+                    return 1
+                fi
+                echo "Set ${key}: $value"
+                ;;
+            *)
+                echo "Error: unknown key '$key'"
+                echo "Available keys: purpose, original_branch"
+                return 1
+                ;;
+        esac
+    else
+        local branch=$(git branch --show-current)
+        local purpose=$(_gw_get_description "$current_path")
+        local original_branch=$(_gw_get_value "$current_path" "original_branch")
+        local pr_number=$(_gw_get_value "$current_path" "pr_number")
+        local pr_url=$(_gw_get_value "$current_path" "pr_url")
+
+        echo "path: $current_path"
+        echo "branch: $branch"
+        echo "purpose: ${purpose:-(not set)}"
+        echo "original_branch: ${original_branch:-(not set)}"
+        if [ -n "$pr_number" ]; then
+            echo "pr_number: $pr_number"
+            echo "pr_url: $pr_url"
+        fi
+    fi
+}
+
+# Prune worktrees interactively
+function _gw_prune() {
+    if ! command -v fzf &> /dev/null; then
+        echo "Error: fzf command not found"
+        return 1
+    fi
+
+    local older_days=0
+    local has_force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --older)
+                if [[ "$2" =~ ^[0-9]+$ ]]; then
+                    older_days="$2"
+                    shift 2
+                else
+                    older_days=7
+                    shift 1
+                fi
+                ;;
+            --force|-f)
+                has_force=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    local main_repo_path
+    main_repo_path=$(_gw_main_repo_path)
+    local repo_name=$(basename "$main_repo_path")
+    local -a wt_paths=()
+    local -a display=()
+    local now=$(date +%s)
+
+    local sorted_lines=(${(f)"$(_gw_sorted_worktrees)"})
+    local wt_path wt_br wt_age wt_ts label formatted elapsed_days
+    for line in "${sorted_lines[@]}"; do
+        IFS=$'\t' read -r wt_path wt_br wt_age wt_ts <<< "$line"
+        [[ "$wt_path" == "$main_repo_path" ]] && continue
+
+        if [[ $older_days -gt 0 ]]; then
+            if [[ -z "$wt_ts" ]] || [[ "$wt_ts" == "0" ]]; then
+                continue
+            fi
+            elapsed_days=$(( (now - wt_ts) / 86400 ))
+            if [[ $elapsed_days -lt $older_days ]]; then
+                continue
+            fi
+        fi
+
+        label=$(_gw_make_label "$wt_path" "$repo_name")
+        formatted=$(_gw_format_worktree_line "$wt_path" "$wt_br" "$label" "auto" "normal" "$wt_age")
+        wt_paths+=("$wt_path")
+        display+=("$formatted")
+    done
+
+    if [ ${#wt_paths[@]} -eq 0 ]; then
+        echo "No worktrees to prune"
+        return 0
+    fi
+
+    local selected
+    selected=$(
+        for (( i=1; i<=${#display[@]}; i++ )); do
+            printf '%d\t%s\n' "$i" "${display[$i]}"
+        done | \
+        fzf --multi \
+            --no-mouse \
+            --tac \
+            --height='~40%' \
+            --header='Tab: toggle, Ctrl-A: select all, Ctrl-D: deselect all, Enter: delete, ESC: cancel' \
+            --bind 'ctrl-a:select-all,ctrl-d:deselect-all' \
+            --with-nth=2.. \
+            --delimiter=$'\t')
+
+    if [ -z "$selected" ]; then
+        echo "Cancelled"
+        return 0
+    fi
+
+    local -a indices
+    indices=($(awk -F'\t' '{print $1}' <<< "$selected"))
+    echo "Removing:"
+    for idx in "${indices[@]}"; do
+        wt_path="${wt_paths[$idx]}"
+        [[ -z "$wt_path" ]] || [[ ! -d "$wt_path" ]] && continue
+        echo "  ${display[$idx]}"
+    done
+    echo ""
+    local failed=0
+    for idx in "${indices[@]}"; do
+        wt_path="${wt_paths[$idx]}"
+        if [ -z "$wt_path" ] || [ ! -d "$wt_path" ]; then
+            continue
+        fi
+        _gw_remove_single "$wt_path" "false" "$has_force" "$main_repo_path" || (( failed++ ))
+    done
+    [[ $failed -gt 0 ]] && return 1 || return 0
+}
+
+# ─── Dispatcher ────────────────────────────────────────────
+
+function gw() {
+    case "$1" in
+        create|cr)
+            shift
+            _gw_create "$@"
+            ;;
+        list|ls)
+            shift
+            _gw_list "$@"
+            ;;
+        remove|rm)
+            shift
+            _gw_remove "$@"
+            ;;
+        switch|sw)
+            shift
+            _gw_switch "$@"
+            ;;
+        describe|desc)
+            shift
+            _gw_describe "$@"
+            ;;
+        review|pr)
+            shift
+            _gw_review "$@"
+            ;;
+        prune)
+            shift
+            _gw_prune "$@"
+            ;;
+        sync)
+            local current main
+            current=$(git rev-parse --show-toplevel 2>/dev/null)
+            main=$(_gw_main_repo_path)
+            if [[ "$current" == "$main" ]]; then
+                echo "Error: run from a worktree, not the main repository" >&2
+                return 1
+            fi
+            _gw_sync_files "$main" "$current"
+            ;;
+        *)
+            echo "Usage: gw <command> [options]"
+            echo ""
+            echo "Commands:"
+            echo "  create, cr [-p <purpose>] <task>  Create worktree and switch to it"
+            echo "  list, ls [--path|-v]     List worktrees (--path: paths, -v: verbose)"
+            echo "  remove, rm [task...]     Remove worktree(s) (no args = current)"
+            echo "  switch, sw [task|-]      Switch to worktree (no args = main, - = previous)"
+            echo "  describe, desc           Show worktree info"
+            echo "    --set purpose=<text>   Set purpose"
+            echo "  review, pr <pr|url>      Create worktree for PR review"
+            echo "  prune [--older N]        Select and remove worktrees (--older N: show only N+ days old, default 7)"
+            echo "  sync                     Sync files from main to current worktree"
+            ;;
+    esac
+}
+
+# ─── Completion ────────────────────────────────────────────
+
+# Complete worktree task names
+function _gw_worktree_tasks() {
+    local -a tasks
+    local main_repo_path repo_name
+
+    main_repo_path=$(_gw_main_repo_path 2>/dev/null)
+    [[ -z "$main_repo_path" ]] && return
+
+    repo_name=$(basename "$main_repo_path")
+    tasks=()
+
+    local sorted_lines=(${(f)"$(_gw_sorted_worktrees 2>/dev/null)"})
+    local wt_path wt_age purpose wt_label desc
+    for line in "${sorted_lines[@]}"; do
+        IFS=$'\t' read -r wt_path _ wt_age _ <<< "$line"
+        wt_label=$(_gw_make_label "$wt_path" "$repo_name")
+        purpose=$(_gw_get_description "$wt_path")
+
+        desc=""
+        [[ -n "$wt_age" ]] && desc="(${wt_age})"
+        [[ -n "$purpose" ]] && desc="${desc:+${desc} }${purpose}"
+
+        if [[ -n "$desc" ]]; then
+            tasks+=("${wt_label}:${desc//:/\\:}")
+        else
+            tasks+=("$wt_label")
+        fi
+    done
+
+    [[ ${#tasks[@]} -gt 0 ]] && _describe -V -t tasks 'worktree task' tasks
+}
+
+# Completion function
+function _gw() {
+    local -a subcommands
+    local state
+
+    subcommands=(
+        'create:Create new worktree and switch to it'
+        'cr:Create new worktree (alias)'
+        'list:List all worktrees'
+        'ls:List worktrees (alias)'
+        'remove:Remove worktree'
+        'rm:Remove worktree (alias)'
+        'switch:Switch to worktree'
+        'sw:Switch to worktree (alias)'
+        'describe:Show or set description'
+        'desc:Show or set description (alias)'
+        'review:Create worktree for PR review'
+        'pr:Create worktree for PR review (alias)'
+        'prune:Select and remove worktrees interactively'
+        'sync:Sync files from main to current worktree'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'gw subcommand' subcommands
+            ;;
+        args)
+            case $words[2] in
+                remove|rm|switch|sw)
+                    _gw_worktree_tasks
+                    ;;
+                create|cr|review|pr)
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+# Register completion
+if (( $+functions[compdef] )); then
+    compdef _gw gw
+fi
