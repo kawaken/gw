@@ -305,7 +305,10 @@ function _gw_format_worktree_line() {
     local left="${label}"
     [[ -n "$age" ]] && left="${label} (${age})"
 
+    local archived=$(_gw_get_value "$worktree_path" "archived")
     local right=""
+    [[ "$archived" == "true" ]] && right="[Archived]"
+
     if [[ "$label" == "main" ]] && [[ "$branch_name" == "main" ]]; then
         :
     elif [[ -n "$original_branch" ]] && [[ "$branch_name" == "$original_branch" ]]; then
@@ -313,7 +316,7 @@ function _gw_format_worktree_line() {
     elif [[ "$label" == "$branch_name" ]]; then
         :
     elif [ "$show_branch" = "always" ] || [ "$show_branch" = "auto" ]; then
-        right="${branch}"
+        right="${right:+${right} }${branch}"
     fi
 
     [[ -n "$purpose" ]] && right="${right:+${right} }${purpose}"
@@ -498,10 +501,14 @@ function _gw_create() {
 # List worktrees
 function _gw_list() {
     local mode="normal"
-    case "$1" in
-        --path) mode="path" ;;
-        -v) mode="verbose" ;;
-    esac
+    local show_archived=false
+    for arg in "$@"; do
+        case "$arg" in
+            --path) mode="path" ;;
+            -v) mode="verbose" ;;
+            -a|--all) show_archived=true ;;
+        esac
+    done
     local main_repo_path
     main_repo_path=$(_gw_main_repo_path)
     local repo_name=$(basename "$main_repo_path")
@@ -510,6 +517,10 @@ function _gw_list() {
     local worktree_path wt_br wt_age label left
     for line in "${sorted_lines[@]}"; do
         IFS=$'\t' read -r worktree_path wt_br wt_age _ <<< "$line"
+        if [[ "$show_archived" == "false" ]]; then
+            local archived=$(_gw_get_value "$worktree_path" "archived")
+            [[ "$archived" == "true" ]] && continue
+        fi
         label=$(_gw_make_label "$worktree_path" "$repo_name")
         if [[ "$mode" == "path" ]]; then
             left="${label}"
@@ -627,10 +638,12 @@ function _gw_switch() {
     cd "$worktree_path"
     echo "Switched to: $worktree_path"
 
+    local archived=$(_gw_get_value "$worktree_path" "archived")
     local description=$(_gw_get_description "$worktree_path")
-    if [ -n "$description" ]; then
-        echo "Purpose: $description"
-    fi
+    local -a info_parts=()
+    [[ "$archived" == "true" ]] && info_parts+=("[Archived]")
+    [[ -n "$description" ]] && info_parts+=("$description")
+    [[ ${#info_parts[@]} -gt 0 ]] && echo "Purpose: ${(j: :)info_parts}"
 }
 
 # Create worktree for PR review
@@ -751,11 +764,13 @@ function _gw_describe() {
         local original_branch=$(_gw_get_value "$current_path" "original_branch")
         local pr_number=$(_gw_get_value "$current_path" "pr_number")
         local pr_url=$(_gw_get_value "$current_path" "pr_url")
+        local archived=$(_gw_get_value "$current_path" "archived")
 
         echo "path: $current_path"
         echo "branch: $branch"
         echo "purpose: ${purpose:-(not set)}"
         echo "original_branch: ${original_branch:-(not set)}"
+        echo "archived: ${archived:-false}"
         if [ -n "$pr_number" ]; then
             echo "pr_number: $pr_number"
             echo "pr_url: $pr_url"
@@ -798,10 +813,11 @@ function _gw_prune() {
     local repo_name=$(basename "$main_repo_path")
     local -a wt_paths=()
     local -a display=()
+    local -a archived_indices=()
     local now=$(date +%s)
 
     local sorted_lines=(${(f)"$(_gw_sorted_worktrees)"})
-    local wt_path wt_br wt_age wt_ts label formatted elapsed_days
+    local wt_path wt_br wt_age wt_ts label formatted elapsed_days wt_archived
     for line in "${sorted_lines[@]}"; do
         IFS=$'\t' read -r wt_path wt_br wt_age wt_ts <<< "$line"
         [[ "$wt_path" == "$main_repo_path" ]] && continue
@@ -820,12 +836,23 @@ function _gw_prune() {
         formatted=$(_gw_format_worktree_line "$wt_path" "$wt_br" "$label" "auto" "normal" "$wt_age")
         wt_paths+=("$wt_path")
         display+=("$formatted")
+        wt_archived=$(_gw_get_value "$wt_path" "archived")
+        [[ "$wt_archived" == "true" ]] && archived_indices+=(${#wt_paths[@]})
     done
 
     if [ ${#wt_paths[@]} -eq 0 ]; then
         echo "No worktrees to prune"
         return 0
     fi
+
+    local total=${#wt_paths[@]}
+    local start_bind=""
+    local p fzf_pos
+    for p in "${archived_indices[@]}"; do
+        fzf_pos=$(( total - p + 1 ))
+        start_bind="${start_bind}pos(${fzf_pos})+toggle+"
+    done
+    [[ -n "$start_bind" ]] && start_bind="start:${start_bind}pos(1)" || start_bind="start:pos(1)"
 
     local selected
     selected=$(
@@ -837,7 +864,7 @@ function _gw_prune() {
             --tac \
             --height='~40%' \
             --header='Tab: toggle, Ctrl-A: select all, Ctrl-D: deselect all, Enter: delete, ESC: cancel' \
-            --bind 'ctrl-a:select-all,ctrl-d:deselect-all' \
+            --bind "ctrl-a:select-all,ctrl-d:deselect-all,${start_bind}" \
             --with-nth=2.. \
             --delimiter=$'\t')
 
@@ -864,6 +891,73 @@ function _gw_prune() {
         _gw_remove_single "$wt_path" "false" "$has_force" "$main_repo_path" || (( failed++ ))
     done
     [[ $failed -gt 0 ]] && return 1 || return 0
+}
+
+# Archive a worktree
+function _gw_archive() {
+    local task_name="$1"
+    local main_repo_path
+    main_repo_path=$(_gw_main_repo_path)
+    local current_path
+    current_path=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local worktree_path
+
+    if [ -z "$task_name" ]; then
+        if [[ "$current_path" == "$main_repo_path" ]]; then
+            echo "Error: cannot archive main worktree"
+            return 1
+        fi
+        if ! git worktree list | awk '{print $1}' | grep -qxF "$current_path"; then
+            echo "Error: current directory is not a worktree"
+            return 1
+        fi
+        worktree_path="$current_path"
+    else
+        worktree_path=$(_gw_resolve_worktree "$task_name")
+        if [[ $? -ne 0 ]] || [[ -z "$worktree_path" ]]; then
+            echo "Error: worktree '$task_name' not found"
+            return 1
+        fi
+        if [[ "$worktree_path" == "$main_repo_path" ]]; then
+            echo "Error: cannot archive main worktree"
+            return 1
+        fi
+    fi
+
+    _gw_set_value "$worktree_path" "archived" "true"
+    local repo_name=$(basename "$main_repo_path")
+    local label=$(_gw_make_label "$worktree_path" "$repo_name")
+    echo "Archived: $label"
+
+    if [[ "$worktree_path" == "$current_path" ]]; then
+        cd "$main_repo_path"
+        echo "Switched to: $main_repo_path"
+    fi
+}
+
+# Activate (unarchive) a worktree
+function _gw_activate() {
+    local task_name="$1"
+    local main_repo_path
+    main_repo_path=$(_gw_main_repo_path)
+    local current_path
+    current_path=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    local worktree_path
+
+    if [ -z "$task_name" ]; then
+        worktree_path="$current_path"
+    else
+        worktree_path=$(_gw_resolve_worktree "$task_name")
+        if [[ $? -ne 0 ]] || [[ -z "$worktree_path" ]]; then
+            echo "Error: worktree '$task_name' not found"
+            return 1
+        fi
+    fi
+
+    _gw_set_value "$worktree_path" "archived" "false"
+    local repo_name=$(basename "$main_repo_path")
+    local label=$(_gw_make_label "$worktree_path" "$repo_name")
+    echo "Activated: $label"
 }
 
 # ─── Dispatcher ────────────────────────────────────────────
@@ -898,6 +992,14 @@ function gw() {
             shift
             _gw_prune "$@"
             ;;
+        archive)
+            shift
+            _gw_archive "$@"
+            ;;
+        activate)
+            shift
+            _gw_activate "$@"
+            ;;
         sync)
             local current main
             current=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -920,6 +1022,8 @@ function gw() {
             echo "    --set purpose=<text>   Set purpose"
             echo "  review, pr <pr|url>      Create worktree for PR review"
             echo "  prune [--older N]        Select and remove worktrees (--older N: show only N+ days old, default 7)"
+            echo "  archive [task]           Archive worktree (no args = current, moves to main)"
+            echo "  activate [task]          Activate archived worktree"
             echo "  sync                     Sync files from main to current worktree"
             ;;
     esac
@@ -959,6 +1063,40 @@ function _gw_worktree_tasks() {
     [[ ${#tasks[@]} -gt 0 ]] && _describe -V -t tasks 'worktree task' tasks
 }
 
+# Complete archived worktree task names
+function _gw_archived_tasks() {
+    local -a tasks
+    local main_repo_path repo_name
+
+    main_repo_path=$(_gw_main_repo_path 2>/dev/null)
+    [[ -z "$main_repo_path" ]] && return
+
+    repo_name=$(basename "$main_repo_path")
+    tasks=()
+
+    local sorted_lines=(${(f)"$(_gw_sorted_worktrees 2>/dev/null)"})
+    local wt_path wt_age purpose wt_label desc wt_archived
+    for line in "${sorted_lines[@]}"; do
+        IFS=$'\t' read -r wt_path _ wt_age _ <<< "$line"
+        wt_archived=$(_gw_get_value "$wt_path" "archived")
+        [[ "$wt_archived" != "true" ]] && continue
+        wt_label=$(_gw_make_label "$wt_path" "$repo_name")
+        purpose=$(_gw_get_description "$wt_path")
+
+        desc=""
+        [[ -n "$wt_age" ]] && desc="(${wt_age})"
+        [[ -n "$purpose" ]] && desc="${desc:+${desc} }${purpose}"
+
+        if [[ -n "$desc" ]]; then
+            tasks+=("${wt_label}:${desc//:/\\:}")
+        else
+            tasks+=("$wt_label")
+        fi
+    done
+
+    [[ ${#tasks[@]} -gt 0 ]] && _describe -V -t tasks 'archived worktree task' tasks
+}
+
 # Completion function
 function _gw() {
     local -a subcommands
@@ -978,6 +1116,8 @@ function _gw() {
         'review:Create worktree for PR review'
         'pr:Create worktree for PR review (alias)'
         'prune:Select and remove worktrees interactively'
+        'archive:Archive worktree'
+        'activate:Activate archived worktree'
         'sync:Sync files from main to current worktree'
     )
 
@@ -991,8 +1131,11 @@ function _gw() {
             ;;
         args)
             case $words[2] in
-                remove|rm|switch|sw)
+                remove|rm|switch|sw|archive)
                     _gw_worktree_tasks
+                    ;;
+                activate)
+                    _gw_archived_tasks
                     ;;
                 create|cr|review|pr)
                     ;;
