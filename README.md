@@ -35,7 +35,6 @@ Claude Code をレビュー専用（plan モード）で起動するヘルパー
 **引数**: `<worktree_path> <pr_number> <pr_url>`
 
 - `claude` コマンドが存在しない場合はスキップ
-- `--permission-mode plan` で起動（コード編集不可）
 - `--append-system-prompt` でレビュー専用の指示をシステムプロンプトに追加
 - 初期プロンプトとして PR番号・URLをClaude Codeに渡す
 
