@@ -1104,17 +1104,11 @@ function _gw() {
 
     subcommands=(
         'create:Create new worktree and switch to it'
-        'cr:Create new worktree (alias)'
         'list:List all worktrees'
-        'ls:List worktrees (alias)'
         'remove:Remove worktree'
-        'rm:Remove worktree (alias)'
         'switch:Switch to worktree'
-        'sw:Switch to worktree (alias)'
         'describe:Show or set description'
-        'desc:Show or set description (alias)'
         'review:Create worktree for PR review'
-        'pr:Create worktree for PR review (alias)'
         'prune:Select and remove worktrees interactively'
         'archive:Archive worktree'
         'activate:Activate archived worktree'
