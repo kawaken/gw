@@ -14,4 +14,4 @@ command -v claude &> /dev/null || return 0
 
 review_prompt="このセッションはレビュー専用です。コードの修正の必要はありません。またPR本体へのコメントも必要ありません。指摘事項があればこちらで教えてください。差分はPRの内容を確認し、PR以外のファイルについての指摘は必要ありません。"
 
-claude --append-system-prompt "$review_prompt" "PR #${pr_number} のレビューを開始してください。PR URL: ${pr_url}"
+claude --permission-mode default --append-system-prompt "$review_prompt" "PR #${pr_number} のレビューを開始してください。PR URL: ${pr_url}"
