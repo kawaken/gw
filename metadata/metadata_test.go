@@ -59,8 +59,12 @@ func TestGetSet(t *testing.T) {
 
 func TestGetAll(t *testing.T) {
 	main, wt := setup(t)
-	metadata.Set(main, wt, "purpose", "hello")
-	metadata.Set(main, wt, "archived", "true")
+	if err := metadata.Set(main, wt, "purpose", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.Set(main, wt, "archived", "true"); err != nil {
+		t.Fatal(err)
+	}
 
 	m := metadata.GetAll(main, wt)
 	if m["purpose"] != "hello" {

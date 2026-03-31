@@ -14,8 +14,8 @@ func TestShortenName(t *testing.T) {
 		{"task-123", "task-123"},
 		{"feature/auth", "feature-auth"},
 		{"a-very-long-task-name-that-exceeds-20-chars", "a-very-long-task-n__"}, // [:18]+"__"
-		{"exactly-twenty-char1", "exactly-twenty-char1"}, // 20 chars: no truncation
-		{"exactly-twenty-chars!", "exactly-twenty-cha__"}, // 21 chars: truncate
+		{"exactly-twenty-char1", "exactly-twenty-char1"},                        // 20 chars: no truncation
+		{"exactly-twenty-chars!", "exactly-twenty-cha__"},                       // 21 chars: truncate
 	}
 	for _, c := range cases {
 		got := worktree.ShortenName(c.in)

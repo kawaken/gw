@@ -20,11 +20,15 @@ func TestPrint(t *testing.T) {
 		CD:       "/tmp/foo",
 	})
 
-	w.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
 
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
