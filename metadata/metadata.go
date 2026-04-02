@@ -33,6 +33,13 @@ func Get(mainRepoPath, wtPath, key string) string {
 
 // Set writes (or replaces) a key=value in the metadata file.
 func Set(mainRepoPath, wtPath, key, value string) error {
+	if strings.ContainsAny(key, "=\n\r") {
+		return fmt.Errorf("metadata key must not contain '=', '\\n', or '\\r': %q", key)
+	}
+	if strings.ContainsAny(value, "\n\r") {
+		return fmt.Errorf("metadata value must not contain '\\n' or '\\r': %q", value)
+	}
+
 	path := metadataPath(mainRepoPath, wtPath)
 
 	var lines []string
