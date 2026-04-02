@@ -90,10 +90,9 @@ func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
 			current.HEAD = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch "):
 			ref := strings.TrimPrefix(line, "branch ")
-			// refs/heads/main → [main]
-			if idx := strings.LastIndex(ref, "/"); idx != -1 {
-				ref = ref[idx+1:]
-			}
+			// refs/heads/feature/auth → feature/auth
+			ref = strings.TrimPrefix(ref, "refs/heads/")
+			ref = strings.TrimPrefix(ref, "refs/")
 			current.Branch = "[" + ref + "]"
 		case line == "detached":
 			current.Branch = "(detached HEAD)"
