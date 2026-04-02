@@ -24,6 +24,11 @@ func Describe(g git.Runner, args []string) int {
 		return 1
 	}
 
+	if fs.NArg() > 1 {
+		output.Errorf("describe: too many arguments")
+		return 1
+	}
+
 	var wtPath string
 	if fs.NArg() > 0 {
 		wtPath, err = worktree.Resolve(g, fs.Arg(0))
