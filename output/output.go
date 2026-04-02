@@ -1,3 +1,4 @@
+// Package output defines the JSON result structure used by all gw subcommands.
 package output
 
 import (

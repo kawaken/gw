@@ -1,3 +1,4 @@
+// Package metadata reads and writes gw_metadata files stored in .git/worktrees/{name}/.
 package metadata
 
 import (
@@ -8,8 +9,6 @@ import (
 )
 
 // metadataPath returns the path to gw_metadata for a given worktree.
-// mainRepoPath is the main repo (where .git lives).
-// wtPath is the worktree path.
 func metadataPath(mainRepoPath, wtPath string) string {
 	name := filepath.Base(wtPath)
 	return filepath.Join(mainRepoPath, ".git", "worktrees", name, "gw_metadata")
@@ -19,12 +18,12 @@ func metadataPath(mainRepoPath, wtPath string) string {
 // Returns empty string if file or key doesn't exist.
 func Get(mainRepoPath, wtPath, key string) string {
 	path := metadataPath(mainRepoPath, wtPath)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is internally derived
 	if err != nil {
 		return ""
 	}
 	prefix := key + "="
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, prefix) {
 			return line[len(prefix):]
 		}
@@ -37,8 +36,8 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 	path := metadataPath(mainRepoPath, wtPath)
 
 	var lines []string
-	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
+	if data, err := os.ReadFile(path); err == nil { //nolint:gosec // path is internally derived
+		for line := range strings.SplitSeq(string(data), "\n") {
 			if line != "" && !strings.HasPrefix(line, key+"=") {
 				lines = append(lines, line)
 			}
@@ -47,23 +46,26 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value))
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write metadata %s: %w", path, err)
+	}
+	return nil
 }
 
 // GetAll returns all key=value pairs from the metadata file as a map.
 func GetAll(mainRepoPath, wtPath string) map[string]string {
 	path := metadataPath(mainRepoPath, wtPath)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is internally derived
 	if err != nil {
 		return map[string]string{}
 	}
 	m := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if idx := strings.IndexByte(line, '='); idx > 0 {
-			m[line[:idx]] = line[idx+1:]
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			m[k] = v
 		}
 	}
 	return m

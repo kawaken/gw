@@ -2,7 +2,7 @@
 
 BIN := ./bin/gw
 
-all: build
+all: build check
 
 build:
 	go build -o $(BIN) ./cmd/gw/
@@ -24,10 +24,16 @@ fmt:
 fmt-check:
 	@diff=$$(gofmt -l .); \
 	if [ -n "$$diff" ]; then \
-		echo "Files not formatted:"; echo "$$diff"; exit 1; \
+		echo "Files not formatted (gofmt):"; echo "$$diff"; exit 1; \
+	fi
+	@if command -v goimports > /dev/null 2>&1; then \
+		diff=$$(goimports -l -local github.com/kawaken/gw .); \
+		if [ -n "$$diff" ]; then \
+			echo "Files not formatted (goimports):"; echo "$$diff"; exit 1; \
+		fi; \
 	fi
 
-check: lint test
+check: fmt-check lint test
 
 clean:
 	rm -f $(BIN)

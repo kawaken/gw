@@ -9,9 +9,12 @@ import (
 type FormatMode int
 
 const (
-	ModeNormal  FormatMode = iota
-	ModeVerbose            // show full path on right
-	ModePath               // show full path instead of branch/purpose
+	// ModeNormal shows label, age, branch (if different), and purpose.
+	ModeNormal FormatMode = iota
+	// ModeVerbose shows everything in ModeNormal plus the full path.
+	ModeVerbose
+	// ModePath shows label, age, and full path (omits branch/purpose).
+	ModePath
 )
 
 // FormatLine builds the display string for a worktree entry.
@@ -43,11 +46,12 @@ func FormatLine(label, branch, age, purpose, originalBranch string, archived boo
 	// Show branch if it differs from label / original_branch
 	branchName := strings.Trim(branch, "[]")
 	showBranch := true
-	if label == "main" && branchName == "main" {
+	switch {
+	case label == "main" && branchName == "main":
 		showBranch = false
-	} else if originalBranch != "" && branchName == originalBranch {
+	case originalBranch != "" && branchName == originalBranch:
 		showBranch = false
-	} else if label == branchName {
+	case label == branchName:
 		showBranch = false
 	}
 	if showBranch && branch != "" {

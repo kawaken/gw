@@ -43,7 +43,7 @@ func TestMakeLabel(t *testing.T) {
 	}
 }
 
-func TestWorktreePath(t *testing.T) {
+func TestPath(t *testing.T) {
 	cases := []struct {
 		task string
 		want string
@@ -54,9 +54,9 @@ func TestWorktreePath(t *testing.T) {
 		{"feature/auth", "/repo/myapp-wt/feature-auth"},
 	}
 	for _, c := range cases {
-		got := worktree.WorktreePath("/repo/myapp", "", c.task)
+		got := worktree.Path("/repo/myapp", "", c.task)
 		if got != c.want {
-			t.Errorf("WorktreePath(%q) = %q, want %q", c.task, got, c.want)
+			t.Errorf("Path(%q) = %q, want %q", c.task, got, c.want)
 		}
 	}
 }

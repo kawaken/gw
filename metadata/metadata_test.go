@@ -15,7 +15,7 @@ func setup(t *testing.T) (mainRepo, wtPath string) {
 	mainRepo = filepath.Join(dir, "myapp")
 	wtPath = filepath.Join(dir, "myapp-wt", "mytask")
 	gitWorktreesDir := filepath.Join(mainRepo, ".git", "worktrees", "mytask")
-	if err := os.MkdirAll(gitWorktreesDir, 0o755); err != nil {
+	if err := os.MkdirAll(gitWorktreesDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	return

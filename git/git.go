@@ -1,7 +1,9 @@
+// Package git provides a thin wrapper around the git CLI.
 package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -16,16 +18,18 @@ type Runner interface {
 // CLI implements Runner using the git CLI.
 type CLI struct{}
 
+// Run executes a git command in the current directory.
 func (c *CLI) Run(args ...string) (string, error) {
 	return runGit("", args...)
 }
 
+// RunIn executes a git command in the specified directory.
 func (c *CLI) RunIn(dir string, args ...string) (string, error) {
 	return runGit(dir, args...)
 }
 
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", args...) //nolint:gosec // always calling "git"
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -54,10 +58,10 @@ type WorktreeEntry struct {
 func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
 	out, err := g.Run("worktree", "list")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
 	var entries []WorktreeEntry
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if line == "" {
 			continue
 		}
@@ -81,7 +85,7 @@ func MainWorktreePath(g Runner) (string, error) {
 		return "", err
 	}
 	if len(entries) == 0 {
-		return "", fmt.Errorf("no worktrees found")
+		return "", errors.New("no worktrees found")
 	}
 	return entries[0].Path, nil
 }

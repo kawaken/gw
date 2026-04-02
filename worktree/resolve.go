@@ -16,7 +16,7 @@ import (
 func Resolve(g git.Runner, query string) (string, error) {
 	mainPath, err := git.MainWorktreePath(g)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve worktree: %w", err)
 	}
 
 	if query == "" || query == "main" {
@@ -25,7 +25,7 @@ func Resolve(g git.Runner, query string) (string, error) {
 
 	entries, err := git.ListWorktrees(g)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve worktree: %w", err)
 	}
 
 	repoName := filepath.Base(mainPath)
@@ -54,9 +54,10 @@ func Resolve(g git.Runner, query string) (string, error) {
 // Returns empty string otherwise.
 func extractPRNumber(query string) string {
 	q := query
-	if strings.HasPrefix(q, "PR-") {
+	switch {
+	case strings.HasPrefix(q, "PR-"):
 		q = q[3:]
-	} else if strings.HasPrefix(q, "#") {
+	case strings.HasPrefix(q, "#"):
 		q = q[1:]
 	}
 	for _, ch := range q {

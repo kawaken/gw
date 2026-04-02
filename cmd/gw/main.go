@@ -1,3 +1,4 @@
+// Command gw is a Git worktree management tool.
 package main
 
 import (

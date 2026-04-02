@@ -1,3 +1,4 @@
+// Package subcmd implements each gw subcommand.
 package subcmd
 
 import (
@@ -9,8 +10,8 @@ import (
 )
 
 // Fmt reads JSON from stdin and extracts the specified field.
-// Usage: gw __fmt <field>
-// Supported fields: messages, cd
+// Usage: gw __fmt <field>.
+// Supported fields: messages, cd.
 func Fmt(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: gw __fmt <field>")

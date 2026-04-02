@@ -1,3 +1,5 @@
+// Package worktree provides helpers for Git worktree path calculation, label generation,
+// name resolution, sorting, and display formatting.
 package worktree
 
 import (
@@ -28,9 +30,9 @@ func BaseDir(mainRepoPath, configDir string) string {
 	return filepath.Join(parent, repo+"-wt")
 }
 
-// WorktreePath returns the full path for a task worktree.
+// Path returns the full path for a task worktree.
 // If taskName is empty or "main", returns mainRepoPath.
-func WorktreePath(mainRepoPath, configDir, taskName string) string {
+func Path(mainRepoPath, configDir, taskName string) string {
 	if taskName == "" || taskName == "main" {
 		return mainRepoPath
 	}

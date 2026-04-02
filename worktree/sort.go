@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ type Entry struct {
 func Sorted(g git.Runner) ([]Entry, error) {
 	wts, err := git.ListWorktrees(g)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sorted worktrees: %w", err)
 	}
 
 	entries := make([]Entry, 0, len(wts))
@@ -45,19 +46,12 @@ func Sorted(g git.Runner) ([]Entry, error) {
 // Returns (timestamp, age) where age has " ago" stripped.
 func parseLogOutput(out string) (int64, string) {
 	out = strings.TrimSpace(out)
-	if out == "" {
-		return 0, ""
+	if tsStr, age, ok := strings.Cut(out, " "); ok {
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			return 0, strings.TrimSuffix(age, " ago")
+		}
+		return ts, strings.TrimSuffix(age, " ago")
 	}
-	idx := strings.IndexByte(out, ' ')
-	if idx < 0 {
-		return 0, ""
-	}
-	tsStr := out[:idx]
-	age := strings.TrimSuffix(out[idx+1:], " ago")
-
-	ts, err := strconv.ParseInt(tsStr, 10, 64)
-	if err != nil {
-		return 0, age
-	}
-	return ts, age
+	return 0, ""
 }
