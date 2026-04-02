@@ -10,10 +10,16 @@ import (
 )
 
 func TestPrint(t *testing.T) {
-	// Capture stdout
 	old := os.Stdout
-	r, w, _ := os.Pipe()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		_ = w.Close()
+	}()
 
 	output.Print(output.Result{
 		Messages: []string{"hello", "world"},
