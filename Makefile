@@ -5,6 +5,7 @@ BIN := ./bin/gw
 all: build check
 
 build:
+	mkdir -p $(dir $(BIN))
 	go build -o $(BIN) ./cmd/gw/
 
 test:
