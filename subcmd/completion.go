@@ -17,6 +17,10 @@ func Completion(g git.Runner, args []string) int {
 		return 1
 	}
 	mode := args[0]
+	if mode != "tasks" && mode != "archived" {
+		fmt.Fprintf(os.Stderr, "gw __completion: unknown mode %q (use tasks or archived)\n", mode)
+		return 1
+	}
 
 	mainPath, err := git.MainWorktreePath(g)
 	if err != nil {

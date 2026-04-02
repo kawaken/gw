@@ -54,33 +54,55 @@ func New() Runner {
 	return &CLI{}
 }
 
-// WorktreeEntry is a parsed line from `git worktree list`.
+// WorktreeEntry is a parsed line from `git worktree list --porcelain`.
 type WorktreeEntry struct {
 	Path   string
 	HEAD   string
-	Branch string // e.g. "[main]" or "(HEAD detached at abc1234)"
+	Branch string // e.g. "[main]", "[feature/foo]", "(detached HEAD)", "(bare)"
 }
 
-// ListWorktrees runs `git worktree list` and returns parsed entries.
+// ListWorktrees runs `git worktree list --porcelain` and returns parsed entries.
 func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
-	out, err := g.Run("worktree", "list")
+	out, err := g.Run("worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
+
 	var entries []WorktreeEntry
+	var current WorktreeEntry
+	inEntry := false
+
 	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" {
+			if inEntry {
+				entries = append(entries, current)
+				current = WorktreeEntry{}
+				inEntry = false
+			}
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
+		inEntry = true
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			current.Path = strings.TrimPrefix(line, "worktree ")
+		case strings.HasPrefix(line, "HEAD "):
+			current.HEAD = strings.TrimPrefix(line, "HEAD ")
+		case strings.HasPrefix(line, "branch "):
+			ref := strings.TrimPrefix(line, "branch ")
+			// refs/heads/main → [main]
+			if idx := strings.LastIndex(ref, "/"); idx != -1 {
+				ref = ref[idx+1:]
+			}
+			current.Branch = "[" + ref + "]"
+		case line == "detached":
+			current.Branch = "(detached HEAD)"
+		case line == "bare":
+			current.Branch = "(bare)"
 		}
-		entries = append(entries, WorktreeEntry{
-			Path:   fields[0],
-			HEAD:   fields[1],
-			Branch: fields[2],
-		})
+	}
+	if inEntry {
+		entries = append(entries, current)
 	}
 	return entries, nil
 }

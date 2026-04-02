@@ -9,9 +9,9 @@ const shellWrapper = `function gw() {
     local result
     result=$(command gw "$@")
     local exit_code=$?
-    echo "$result" | command gw __fmt messages
+    printf '%s\n' "$result" | command gw __fmt messages
     local cd_path
-    cd_path=$(echo "$result" | command gw __fmt cd)
+    cd_path=$(printf '%s\n' "$result" | command gw __fmt cd)
     if [[ $exit_code -eq 0 ]] && [[ -n "$cd_path" ]]; then
         export GW_PREVIOUS_WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null)"
         cd "$cd_path"
@@ -68,7 +68,7 @@ func Init(args []string) int {
 	}
 	switch shell {
 	case "zsh":
-		fmt.Print(shellWrapper)
+		_, _ = os.Stdout.WriteString(shellWrapper)
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "gw init: unsupported shell %q (supported: zsh)\n", shell)

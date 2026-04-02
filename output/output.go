@@ -34,7 +34,7 @@ func Print(r Result) {
 	}
 }
 
-// Error writes an error result as JSON to stdout and returns exit code 1.
+// Error writes an error result as JSON to stdout.
 func Error(msg string) {
 	Print(Result{Messages: []string{msg}})
 }
