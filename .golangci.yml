@@ -1,0 +1,34 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  # デフォルト有効 (v2): errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - misspell     # スペルミス
+    - errorlint    # Go 1.13+ エラーラッピング慣習
+    - copyloopvar  # ループ変数コピーの検出
+    - nolintlint   # nolint ディレクティブの正当性
+    - revive       # golint 後継
+    - gocritic     # バグ・パフォーマンス・スタイル診断
+    - godot        # コメント末尾ピリオド
+    - modernize    # 新API活用提案
+    - gosec        # セキュリティチェック
+    - wrapcheck    # エラーラッピング
+    - exhaustive   # enum switch 網羅性
+    - perfsprint   # fmt.Sprintf 最適化
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/kawaken/gw
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
