@@ -2,8 +2,6 @@ package subcmd
 
 import (
 	"flag"
-	"os/exec"
-	"strings"
 
 	"github.com/kawaken/gw/git"
 	"github.com/kawaken/gw/metadata"
@@ -26,7 +24,6 @@ func Describe(g git.Runner, args []string) int {
 		return 1
 	}
 
-	// Determine target worktree path
 	var wtPath string
 	if fs.NArg() > 0 {
 		wtPath, err = worktree.Resolve(g, fs.Arg(0))
@@ -35,7 +32,11 @@ func Describe(g git.Runner, args []string) int {
 			return 1
 		}
 	} else {
-		wtPath = gitToplevel()
+		wtPath, err = g.Toplevel()
+		if err != nil {
+			output.Errorf("describe: %v", err)
+			return 1
+		}
 	}
 
 	if *purpose != "" {
@@ -49,16 +50,16 @@ func Describe(g git.Runner, args []string) int {
 		return 0
 	}
 
-	// Show all metadata
 	m := metadata.GetAll(mainPath, wtPath)
 	branch, _ := g.RunIn(wtPath, "branch", "--show-current")
 
-	var msgs []string
-	msgs = append(msgs, "path: "+wtPath)
-	msgs = append(msgs, "branch: "+branch)
-	msgs = append(msgs, "purpose: "+strDefault(m["purpose"], "(not set)"))
-	msgs = append(msgs, "original_branch: "+strDefault(m["original_branch"], "(not set)"))
-	msgs = append(msgs, "archived: "+strDefault(m["archived"], "false"))
+	msgs := []string{
+		"path: " + wtPath,
+		"branch: " + branch,
+		"purpose: " + strDefault(m["purpose"], "(not set)"),
+		"original_branch: " + strDefault(m["original_branch"], "(not set)"),
+		"archived: " + strDefault(m["archived"], "false"),
+	}
 	if pn := m["pr_number"]; pn != "" {
 		msgs = append(msgs, "pr_number: "+pn)
 		msgs = append(msgs, "pr_url: "+m["pr_url"])
@@ -66,15 +67,6 @@ func Describe(g git.Runner, args []string) int {
 
 	output.Print(output.Result{Messages: msgs})
 	return 0
-}
-
-// gitToplevel returns the git toplevel of the current directory, or ".".
-func gitToplevel() string {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "."
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func strDefault(s, def string) string {

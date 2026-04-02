@@ -43,7 +43,6 @@ func Sorted(g git.Runner) ([]Entry, error) {
 }
 
 // parseLogOutput parses the output of `git log -1 --format="%ct %cr"`.
-// Returns (timestamp, age) where age has " ago" stripped.
 func parseLogOutput(out string) (int64, string) {
 	out = strings.TrimSpace(out)
 	if tsStr, age, ok := strings.Cut(out, " "); ok {

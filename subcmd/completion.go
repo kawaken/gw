@@ -29,11 +29,13 @@ func Completion(g git.Runner, args []string) int {
 	}
 
 	for _, e := range entries {
-		archived := metadata.Get(mainPath, e.Path, "archived") == "true"
 		label := worktree.MakeLabel(e.Path, mainPath)
 		if label == "main" {
 			continue
 		}
+
+		m := metadata.GetAll(mainPath, e.Path)
+		archived := m["archived"] == "true"
 
 		switch mode {
 		case "tasks":
@@ -46,8 +48,7 @@ func Completion(g git.Runner, args []string) int {
 			}
 		}
 
-		purpose := metadata.Get(mainPath, e.Path, "purpose")
-		desc := purpose
+		desc := m["purpose"]
 		if desc == "" {
 			desc = e.Branch
 		}

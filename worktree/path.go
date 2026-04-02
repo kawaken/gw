@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// ShortenName replaces "/" with "-" and truncates to 20 chars (appending "__").
+// ShortenName normalizes a task name for use as a directory name.
 func ShortenName(name string) string {
 	s := strings.ReplaceAll(name, "/", "-")
 	if len(s) > 20 {

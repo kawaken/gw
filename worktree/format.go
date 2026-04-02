@@ -17,53 +17,54 @@ const (
 	ModePath
 )
 
+// FormatInfo holds the display fields for a single worktree line.
+type FormatInfo struct {
+	Label          string
+	Branch         string // raw branch field from git worktree list (e.g. "[main]")
+	Age            string
+	Purpose        string
+	OriginalBranch string
+	Archived       bool
+	Path           string
+}
+
 // FormatLine builds the display string for a worktree entry.
-//   - label: short name (from MakeLabel)
-//   - branch: raw branch field (e.g. "[main]" or "[feature/foo]")
-//   - age: human-readable age (may be empty)
-//   - purpose: from metadata "purpose" key (may be empty)
-//   - originalBranch: from metadata "original_branch" key
-//   - archived: from metadata "archived" key == "true"
-//   - wtPath: full path (used in verbose/path mode)
-//   - mode: FormatMode
-func FormatLine(label, branch, age, purpose, originalBranch string, archived bool, wtPath string, mode FormatMode) string {
-	left := label
-	if age != "" {
-		left = fmt.Sprintf("%s (%s)", label, age)
+func FormatLine(info FormatInfo, mode FormatMode) string {
+	left := info.Label
+	if info.Age != "" {
+		left = fmt.Sprintf("%s (%s)", info.Label, info.Age)
 	}
 
 	if mode == ModePath {
-		return fmt.Sprintf("%s\t%s", left, wtPath)
+		return fmt.Sprintf("%s\t%s", left, info.Path)
 	}
 
-	// Build right side
 	var rightParts []string
 
-	if archived {
+	if info.Archived {
 		rightParts = append(rightParts, "[Archived]")
 	}
 
-	// Show branch if it differs from label / original_branch
-	branchName := strings.Trim(branch, "[]")
+	branchName := strings.Trim(info.Branch, "[]")
 	showBranch := true
 	switch {
-	case label == "main" && branchName == "main":
+	case info.Label == "main" && branchName == "main":
 		showBranch = false
-	case originalBranch != "" && branchName == originalBranch:
+	case info.OriginalBranch != "" && branchName == info.OriginalBranch:
 		showBranch = false
-	case label == branchName:
+	case info.Label == branchName:
 		showBranch = false
 	}
-	if showBranch && branch != "" {
-		rightParts = append(rightParts, branch)
+	if showBranch && info.Branch != "" {
+		rightParts = append(rightParts, info.Branch)
 	}
 
-	if purpose != "" {
-		rightParts = append(rightParts, purpose)
+	if info.Purpose != "" {
+		rightParts = append(rightParts, info.Purpose)
 	}
 
 	if mode == ModeVerbose {
-		rightParts = append(rightParts, wtPath)
+		rightParts = append(rightParts, info.Path)
 	}
 
 	right := strings.Join(rightParts, " ")

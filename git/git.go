@@ -13,6 +13,8 @@ import (
 type Runner interface {
 	Run(args ...string) (string, error)
 	RunIn(dir string, args ...string) (string, error)
+	// Toplevel returns the absolute path of the top-level directory of the current git repo.
+	Toplevel() (string, error)
 }
 
 // CLI implements Runner using the git CLI.
@@ -26,6 +28,11 @@ func (c *CLI) Run(args ...string) (string, error) {
 // RunIn executes a git command in the specified directory.
 func (c *CLI) RunIn(dir string, args ...string) (string, error) {
 	return runGit(dir, args...)
+}
+
+// Toplevel returns the absolute path of the top-level directory of the current git repo.
+func (c *CLI) Toplevel() (string, error) {
+	return c.Run("rev-parse", "--show-toplevel")
 }
 
 func runGit(dir string, args ...string) (string, error) {

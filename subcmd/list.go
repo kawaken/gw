@@ -14,18 +14,13 @@ func List(g git.Runner, args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	showPath := fs.Bool("path", false, "show path instead of branch/purpose")
 	verbose := fs.Bool("v", false, "verbose (show full path)")
-	showAll := fs.Bool("a", false, "include archived worktrees")
-	fs.Bool("all", false, "include archived worktrees") // alias
+	var showAll bool
+	fs.BoolVar(&showAll, "a", false, "include archived worktrees")
+	fs.BoolVar(&showAll, "all", false, "include archived worktrees")
 	if err := fs.Parse(args); err != nil {
 		output.Errorf("list: %v", err)
 		return 1
 	}
-	// re-check --all
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "all" {
-			*showAll = true
-		}
-	})
 
 	mainPath, err := git.MainWorktreePath(g)
 	if err != nil {
@@ -50,24 +45,29 @@ func List(g git.Runner, args []string) int {
 	var infos []output.WorktreeInfo
 
 	for _, e := range entries {
-		archived := metadata.Get(mainPath, e.Path, "archived") == "true"
-		if !*showAll && archived {
+		m := metadata.GetAll(mainPath, e.Path)
+		archived := m["archived"] == "true"
+		if !showAll && archived {
 			continue
 		}
 		label := worktree.MakeLabel(e.Path, mainPath)
-		purpose := metadata.Get(mainPath, e.Path, "purpose")
-		origBranch := metadata.Get(mainPath, e.Path, "original_branch")
-
-		line := worktree.FormatLine(label, e.Branch, e.Age, purpose, origBranch, archived, e.Path, mode)
-		messages = append(messages, line)
-
+		info := worktree.FormatInfo{
+			Label:          label,
+			Branch:         e.Branch,
+			Age:            e.Age,
+			Purpose:        m["purpose"],
+			OriginalBranch: m["original_branch"],
+			Archived:       archived,
+			Path:           e.Path,
+		}
+		messages = append(messages, worktree.FormatLine(info, mode))
 		infos = append(infos, output.WorktreeInfo{
 			Label:    label,
 			Branch:   e.Branch,
 			Age:      e.Age,
 			Path:     e.Path,
 			Archived: archived,
-			Purpose:  purpose,
+			Purpose:  m["purpose"],
 		})
 	}
 
