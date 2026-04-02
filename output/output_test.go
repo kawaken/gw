@@ -3,38 +3,19 @@ package output_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/kawaken/gw/output"
 )
 
 func TestPrint(t *testing.T) {
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	defer func() {
-		os.Stdout = old
-		_ = w.Close()
-	}()
+	t.Parallel()
 
-	output.Print(output.Result{
+	var buf bytes.Buffer
+	output.Write(&buf, output.Result{
 		Messages: []string{"hello", "world"},
 		CD:       "/tmp/foo",
 	})
-
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(r); err != nil {
-		t.Fatal(err)
-	}
 
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {

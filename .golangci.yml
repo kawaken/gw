@@ -19,6 +19,18 @@ linters:
     - wrapcheck    # エラーラッピング
     - exhaustive   # enum switch 網羅性
     - perfsprint   # fmt.Sprintf 最適化
+    - reassign     # package 変数の再代入を禁止
+    - predeclared  # 組み込み識別子のシャドーを検出
+    - gocheckcompilerdirectives # //go: ディレクティブの検証
+    - wastedassign # 上書きされて無駄になる代入を検出
+    - nilerr       # err != nil なのに nil を返すバグを検出
+    - nilnesserr   # err != nil と返却値の不整合を検出
+    - nilnil       # nil error と無効値の同時返却を検出
+    - unconvert    # 不要な型変換を検出
+    - usestdlibvars # 標準ライブラリ定数/変数の利用を促す
+    - thelper      # テストヘルパーの t.Helper() を強制
+    - noctx        # context なしの exec.Command などを検出
+    - paralleltest # 並列実行可能なテストに t.Parallel() を要求
   settings:
     gosec:
       excludes:

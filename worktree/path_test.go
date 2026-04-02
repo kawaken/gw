@@ -7,6 +7,8 @@ import (
 )
 
 func TestShortenName(t *testing.T) {
+	t.Parallel()
+
 	// Short names pass through unchanged.
 	if got := worktree.ShortenName("task-123"); got != "task-123" {
 		t.Errorf("ShortenName(short) = %q, want %q", got, "task-123")
@@ -42,6 +44,8 @@ func TestShortenName(t *testing.T) {
 }
 
 func TestMakeLabel(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		wtPath   string
 		mainPath string
@@ -60,6 +64,8 @@ func TestMakeLabel(t *testing.T) {
 }
 
 func TestPath(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		task string
 		want string

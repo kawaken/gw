@@ -7,6 +7,8 @@ import (
 )
 
 func TestFormatLine(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		info worktree.FormatInfo
@@ -54,6 +56,8 @@ func TestFormatLine(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := worktree.FormatLine(c.info, c.mode)
 			if got != c.want {
 				t.Errorf("got %q, want %q", got, c.want)

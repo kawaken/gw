@@ -29,6 +29,8 @@ func setupLinkedWorktree(t *testing.T, adminDirName, wtPath string) (mainRepo st
 }
 
 func TestGetSet(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	wt := filepath.Join(dir, "myapp-wt", "mytask")
 	main := setupLinkedWorktree(t, "mytask", wt)
@@ -63,6 +65,8 @@ func TestGetSet(t *testing.T) {
 }
 
 func TestGetAll(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	wt := filepath.Join(dir, "myapp-wt", "mytask")
 	main := setupLinkedWorktree(t, "mytask", wt)
@@ -84,6 +88,8 @@ func TestGetAll(t *testing.T) {
 }
 
 func TestUsesGitdirWhenAdminDirDiffersFromBasename(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	wt := filepath.Join(dir, "b", "same")
 	main := setupLinkedWorktree(t, "same1", wt)

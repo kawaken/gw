@@ -21,6 +21,8 @@ branch refs/heads/task-2
 `
 
 func TestSorted(t *testing.T) {
+	t.Parallel()
+
 	g := &git.FakeRunner{
 		Responses: map[string]string{
 			"worktree list --porcelain": porcelainTwo,
@@ -50,6 +52,8 @@ func TestSorted(t *testing.T) {
 }
 
 func TestSortedMissingLog(t *testing.T) {
+	t.Parallel()
+
 	// Worktrees with no commits get timestamp=0 and sort last.
 	g := &git.FakeRunner{
 		Responses: map[string]string{

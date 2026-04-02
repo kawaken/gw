@@ -29,6 +29,8 @@ func newResolveRunner() git.Runner {
 }
 
 func TestResolve(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		query   string
 		want    string
@@ -45,6 +47,8 @@ func TestResolve(t *testing.T) {
 	g := newResolveRunner()
 	for _, c := range cases {
 		t.Run(c.query, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := worktree.Resolve(g, c.query)
 			if c.wantErr {
 				if err == nil {

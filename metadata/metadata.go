@@ -19,11 +19,11 @@ func metadataPath(mainRepoPath, wtPath string) string {
 	return filepath.Join(adminDir, "gw_metadata")
 }
 
-func worktreeAdminDir(mainRepoPath, wtPath string) (string, error) {
+func worktreeAdminDir(_ string, wtPath string) (string, error) {
 	gitPath := filepath.Join(wtPath, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("stat %s: %w", gitPath, err)
 	}
 	if info.IsDir() {
 		return gitPath, nil
@@ -31,7 +31,7 @@ func worktreeAdminDir(mainRepoPath, wtPath string) (string, error) {
 
 	data, err := os.ReadFile(gitPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read %s: %w", gitPath, err)
 	}
 	line := strings.TrimSpace(string(data))
 	gitDir, ok := strings.CutPrefix(line, "gitdir: ")

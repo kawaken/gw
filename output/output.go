@@ -4,6 +4,7 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -27,7 +28,12 @@ type WorktreeInfo struct {
 
 // Print writes the Result as JSON to stdout.
 func Print(r Result) {
-	enc := json.NewEncoder(os.Stdout)
+	Write(os.Stdout, r)
+}
+
+// Write writes the Result as JSON to the given writer.
+func Write(w io.Writer, r Result) {
+	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(r); err != nil {
 		fmt.Fprintf(os.Stderr, "output error: %v\n", err)
