@@ -33,33 +33,53 @@ func TestGetSet(t *testing.T) {
 
 	dir := t.TempDir()
 	wt := filepath.Join(dir, "myapp-wt", "mytask")
-	main := setupLinkedWorktree(t, "mytask", wt)
+	_ = setupLinkedWorktree(t, "mytask", wt)
 
-	if got := metadata.Get(main, wt, "purpose"); got != "" {
+	got, err := metadata.Get(wt, "purpose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
 
-	if err := metadata.Set(main, wt, "purpose", "fix auth bug"); err != nil {
+	if err := metadata.Set(wt, "purpose", "fix auth bug"); err != nil {
 		t.Fatal(err)
 	}
-	if got := metadata.Get(main, wt, "purpose"); got != "fix auth bug" {
+	got, err = metadata.Get(wt, "purpose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "fix auth bug" {
 		t.Errorf("got %q, want %q", got, "fix auth bug")
 	}
 
-	if err := metadata.Set(main, wt, "purpose", "new purpose"); err != nil {
+	if err := metadata.Set(wt, "purpose", "new purpose"); err != nil {
 		t.Fatal(err)
 	}
-	if got := metadata.Get(main, wt, "purpose"); got != "new purpose" {
+	got, err = metadata.Get(wt, "purpose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "new purpose" {
 		t.Errorf("got %q, want %q", got, "new purpose")
 	}
 
-	if err := metadata.Set(main, wt, "archived", "true"); err != nil {
+	if err := metadata.Set(wt, "archived", "true"); err != nil {
 		t.Fatal(err)
 	}
-	if got := metadata.Get(main, wt, "purpose"); got != "new purpose" {
+	got, err = metadata.Get(wt, "purpose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "new purpose" {
 		t.Errorf("purpose changed: %q", got)
 	}
-	if got := metadata.Get(main, wt, "archived"); got != "true" {
+	got, err = metadata.Get(wt, "archived")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "true" {
 		t.Errorf("archived: %q", got)
 	}
 }
@@ -69,16 +89,19 @@ func TestGetAll(t *testing.T) {
 
 	dir := t.TempDir()
 	wt := filepath.Join(dir, "myapp-wt", "mytask")
-	main := setupLinkedWorktree(t, "mytask", wt)
+	_ = setupLinkedWorktree(t, "mytask", wt)
 
-	if err := metadata.Set(main, wt, "purpose", "hello"); err != nil {
+	if err := metadata.Set(wt, "purpose", "hello"); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.Set(main, wt, "archived", "true"); err != nil {
+	if err := metadata.Set(wt, "archived", "true"); err != nil {
 		t.Fatal(err)
 	}
 
-	m := metadata.GetAll(main, wt)
+	m, err := metadata.GetAll(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if m["purpose"] != "hello" {
 		t.Errorf("purpose: %q", m["purpose"])
 	}
@@ -94,11 +117,14 @@ func TestUsesGitdirWhenAdminDirDiffersFromBasename(t *testing.T) {
 	wt := filepath.Join(dir, "b", "same")
 	main := setupLinkedWorktree(t, "same1", wt)
 
-	if err := metadata.Set(main, wt, "purpose", "collision-safe"); err != nil {
+	if err := metadata.Set(wt, "purpose", "collision-safe"); err != nil {
 		t.Fatal(err)
 	}
 
-	got := metadata.Get(main, wt, "purpose")
+	got, err := metadata.Get(wt, "purpose")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got != "collision-safe" {
 		t.Fatalf("got %q, want %q", got, "collision-safe")
 	}
@@ -113,5 +139,18 @@ func TestUsesGitdirWhenAdminDirDiffersFromBasename(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(main, ".git", "worktrees", "same", "gw_metadata")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected legacy metadata file created: %v", err)
+	}
+}
+
+func TestGetAllReturnsErrorWhenAdminDirCannotBeResolved(t *testing.T) {
+	t.Parallel()
+
+	wt := filepath.Join(t.TempDir(), "broken-worktree")
+	if err := os.MkdirAll(wt, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := metadata.GetAll(wt); err == nil {
+		t.Fatal("expected error, got nil")
 	}
 }

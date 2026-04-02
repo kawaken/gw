@@ -45,7 +45,11 @@ func List(g git.Runner, args []string) int {
 	var infos []output.WorktreeInfo
 
 	for _, e := range entries {
-		m := metadata.GetAll(mainPath, e.Path)
+		m, err := metadata.GetAll(e.Path)
+		if err != nil {
+			output.Errorf("list: read metadata for %s: %v", e.Path, err)
+			return 1
+		}
 		archived := m["archived"] == "true"
 		if !showAll && archived {
 			continue

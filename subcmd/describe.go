@@ -18,7 +18,7 @@ func Describe(g git.Runner, args []string) int {
 		return 1
 	}
 
-	mainPath, err := git.MainWorktreePath(g)
+	_, err := git.MainWorktreePath(g)
 	if err != nil {
 		output.Errorf("describe: %v", err)
 		return 1
@@ -45,7 +45,7 @@ func Describe(g git.Runner, args []string) int {
 	}
 
 	if *purpose != "" {
-		if err := metadata.Set(mainPath, wtPath, "purpose", *purpose); err != nil {
+		if err := metadata.Set(wtPath, "purpose", *purpose); err != nil {
 			output.Errorf("describe: failed to set purpose: %v", err)
 			return 1
 		}
@@ -55,7 +55,11 @@ func Describe(g git.Runner, args []string) int {
 		return 0
 	}
 
-	m := metadata.GetAll(mainPath, wtPath)
+	m, err := metadata.GetAll(wtPath)
+	if err != nil {
+		output.Errorf("describe: failed to read metadata: %v", err)
+		return 1
+	}
 	branch, _ := g.RunIn(wtPath, "branch", "--show-current")
 
 	msgs := []string{

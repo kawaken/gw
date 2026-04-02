@@ -38,7 +38,10 @@ func Completion(g git.Runner, args []string) int {
 			continue
 		}
 
-		m := metadata.GetAll(mainPath, e.Path)
+		m, err := metadata.GetAll(e.Path)
+		if err != nil {
+			return 1
+		}
 		archived := m["archived"] == "true"
 
 		switch mode {

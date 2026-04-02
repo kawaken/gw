@@ -9,17 +9,15 @@ import (
 )
 
 // metadataPath returns the path to gw_metadata for a given worktree.
-func metadataPath(mainRepoPath, wtPath string) string {
-	adminDir, err := worktreeAdminDir(mainRepoPath, wtPath)
+func metadataPath(wtPath string) (string, error) {
+	adminDir, err := worktreeAdminDir(wtPath)
 	if err != nil {
-		// Fall back to the historical location if the admin dir cannot be resolved.
-		name := filepath.Base(wtPath)
-		return filepath.Join(mainRepoPath, ".git", "worktrees", name, "gw_metadata")
+		return "", err
 	}
-	return filepath.Join(adminDir, "gw_metadata")
+	return filepath.Join(adminDir, "gw_metadata"), nil
 }
 
-func worktreeAdminDir(_ string, wtPath string) (string, error) {
+func worktreeAdminDir(wtPath string) (string, error) {
 	gitPath := filepath.Join(wtPath, ".git")
 	info, err := os.Stat(gitPath)
 	if err != nil {
@@ -46,23 +44,29 @@ func worktreeAdminDir(_ string, wtPath string) (string, error) {
 
 // Get reads a key from the metadata file.
 // Returns empty string if file or key doesn't exist.
-func Get(mainRepoPath, wtPath, key string) string {
-	path := metadataPath(mainRepoPath, wtPath)
+func Get(wtPath, key string) (string, error) {
+	path, err := metadataPath(wtPath)
+	if err != nil {
+		return "", err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read metadata %s: %w", path, err)
 	}
 	prefix := key + "="
 	for line := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(line, prefix) {
-			return line[len(prefix):]
+			return line[len(prefix):], nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // Set writes (or replaces) a key=value in the metadata file.
-func Set(mainRepoPath, wtPath, key, value string) error {
+func Set(wtPath, key, value string) error {
 	if strings.ContainsAny(key, "=\n\r") {
 		return fmt.Errorf("metadata key must not contain '=', '\\n', or '\\r': %q", key)
 	}
@@ -70,7 +74,10 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 		return fmt.Errorf("metadata value must not contain '\\n' or '\\r': %q", value)
 	}
 
-	path := metadataPath(mainRepoPath, wtPath)
+	path, err := metadataPath(wtPath)
+	if err != nil {
+		return err
+	}
 
 	var lines []string
 	if data, err := os.ReadFile(path); err == nil {
@@ -93,11 +100,17 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 }
 
 // GetAll returns all key=value pairs from the metadata file as a map.
-func GetAll(mainRepoPath, wtPath string) map[string]string {
-	path := metadataPath(mainRepoPath, wtPath)
+func GetAll(wtPath string) (map[string]string, error) {
+	path, err := metadataPath(wtPath)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return map[string]string{}
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("read metadata %s: %w", path, err)
 	}
 	m := map[string]string{}
 	for line := range strings.SplitSeq(string(data), "\n") {
@@ -105,5 +118,5 @@ func GetAll(mainRepoPath, wtPath string) map[string]string {
 			m[k] = v
 		}
 	}
-	return m
+	return m, nil
 }
