@@ -18,7 +18,7 @@ func metadataPath(mainRepoPath, wtPath string) string {
 // Returns empty string if file or key doesn't exist.
 func Get(mainRepoPath, wtPath, key string) string {
 	path := metadataPath(mainRepoPath, wtPath)
-	data, err := os.ReadFile(path) //nolint:gosec // path is internally derived
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -36,7 +36,7 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 	path := metadataPath(mainRepoPath, wtPath)
 
 	var lines []string
-	if data, err := os.ReadFile(path); err == nil { //nolint:gosec // path is internally derived
+	if data, err := os.ReadFile(path); err == nil {
 		for line := range strings.SplitSeq(string(data), "\n") {
 			if line != "" && !strings.HasPrefix(line, key+"=") {
 				lines = append(lines, line)
@@ -58,7 +58,7 @@ func Set(mainRepoPath, wtPath, key, value string) error {
 // GetAll returns all key=value pairs from the metadata file as a map.
 func GetAll(mainRepoPath, wtPath string) map[string]string {
 	path := metadataPath(mainRepoPath, wtPath)
-	data, err := os.ReadFile(path) //nolint:gosec // path is internally derived
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]string{}
 	}

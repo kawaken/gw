@@ -36,7 +36,7 @@ func (c *CLI) Toplevel() (string, error) {
 }
 
 func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...) //nolint:gosec // always calling "git"
+	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

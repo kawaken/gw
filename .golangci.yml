@@ -19,6 +19,16 @@ linters:
     - wrapcheck    # エラーラッピング
     - exhaustive   # enum switch 網羅性
     - perfsprint   # fmt.Sprintf 最適化
+  settings:
+    gosec:
+      excludes:
+        - G204  # subprocess with variable: 常に "git" を呼ぶため誤検知
+        - G304  # file inclusion via variable: CLI ツール自身が生成するパスのため誤検知
+  exclusions:
+    rules:
+      # テストコードの wrapcheck は過剰
+      - linters: [wrapcheck]
+        path: "_test\\.go"
 
 formatters:
   enable:

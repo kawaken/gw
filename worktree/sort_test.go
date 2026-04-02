@@ -115,11 +115,11 @@ type mixedLogFake struct {
 	overrides map[string]string
 }
 
-func (f *mixedLogFake) Run(args ...string) (string, error) { return f.base.Run(args...) } //nolint:wrapcheck
-func (f *mixedLogFake) Toplevel() (string, error)          { return f.base.Toplevel() }   //nolint:wrapcheck
+func (f *mixedLogFake) Run(args ...string) (string, error) { return f.base.Run(args...) }
+func (f *mixedLogFake) Toplevel() (string, error)          { return f.base.Toplevel() }
 func (f *mixedLogFake) RunIn(dir string, args ...string) (string, error) {
 	if v, ok := f.overrides[dir]; ok {
 		return v, nil
 	}
-	return f.base.Run(args...) //nolint:wrapcheck
+	return f.base.Run(args...)
 }
