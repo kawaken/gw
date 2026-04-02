@@ -10,8 +10,38 @@ import (
 
 // metadataPath returns the path to gw_metadata for a given worktree.
 func metadataPath(mainRepoPath, wtPath string) string {
-	name := filepath.Base(wtPath)
-	return filepath.Join(mainRepoPath, ".git", "worktrees", name, "gw_metadata")
+	adminDir, err := worktreeAdminDir(mainRepoPath, wtPath)
+	if err != nil {
+		// Fall back to the historical location if the admin dir cannot be resolved.
+		name := filepath.Base(wtPath)
+		return filepath.Join(mainRepoPath, ".git", "worktrees", name, "gw_metadata")
+	}
+	return filepath.Join(adminDir, "gw_metadata")
+}
+
+func worktreeAdminDir(mainRepoPath, wtPath string) (string, error) {
+	gitPath := filepath.Join(wtPath, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return gitPath, nil
+	}
+
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(data))
+	gitDir, ok := strings.CutPrefix(line, "gitdir: ")
+	if !ok {
+		return "", fmt.Errorf("invalid gitdir file: %s", gitPath)
+	}
+	if filepath.IsAbs(gitDir) {
+		return filepath.Clean(gitDir), nil
+	}
+	return filepath.Clean(filepath.Join(wtPath, gitDir)), nil
 }
 
 // Get reads a key from the metadata file.

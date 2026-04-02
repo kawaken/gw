@@ -8,28 +8,35 @@ import (
 	"github.com/kawaken/gw/metadata"
 )
 
-func setup(t *testing.T) (mainRepo, wtPath string) {
+func setupLinkedWorktree(t *testing.T, adminDirName, wtPath string) (mainRepo string) {
 	t.Helper()
 	dir := t.TempDir()
-	// Simulate: mainRepo/.git/worktrees/mytask/
 	mainRepo = filepath.Join(dir, "myapp")
-	wtPath = filepath.Join(dir, "myapp-wt", "mytask")
-	gitWorktreesDir := filepath.Join(mainRepo, ".git", "worktrees", "mytask")
-	if err := os.MkdirAll(gitWorktreesDir, 0o750); err != nil {
+	adminDir := filepath.Join(mainRepo, ".git", "worktrees", adminDirName)
+
+	if err := os.MkdirAll(adminDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	return
+	if err := os.MkdirAll(wtPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(wtPath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+adminDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return mainRepo
 }
 
 func TestGetSet(t *testing.T) {
-	main, wt := setup(t)
+	dir := t.TempDir()
+	wt := filepath.Join(dir, "myapp-wt", "mytask")
+	main := setupLinkedWorktree(t, "mytask", wt)
 
-	// Get on missing key returns ""
 	if got := metadata.Get(main, wt, "purpose"); got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
 
-	// Set and Get
 	if err := metadata.Set(main, wt, "purpose", "fix auth bug"); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +44,6 @@ func TestGetSet(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "fix auth bug")
 	}
 
-	// Overwrite
 	if err := metadata.Set(main, wt, "purpose", "new purpose"); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +51,6 @@ func TestGetSet(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "new purpose")
 	}
 
-	// Other keys untouched
 	if err := metadata.Set(main, wt, "archived", "true"); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +63,10 @@ func TestGetSet(t *testing.T) {
 }
 
 func TestGetAll(t *testing.T) {
-	main, wt := setup(t)
+	dir := t.TempDir()
+	wt := filepath.Join(dir, "myapp-wt", "mytask")
+	main := setupLinkedWorktree(t, "mytask", wt)
+
 	if err := metadata.Set(main, wt, "purpose", "hello"); err != nil {
 		t.Fatal(err)
 	}
@@ -72,5 +80,32 @@ func TestGetAll(t *testing.T) {
 	}
 	if m["archived"] != "true" {
 		t.Errorf("archived: %q", m["archived"])
+	}
+}
+
+func TestUsesGitdirWhenAdminDirDiffersFromBasename(t *testing.T) {
+	dir := t.TempDir()
+	wt := filepath.Join(dir, "b", "same")
+	main := setupLinkedWorktree(t, "same1", wt)
+
+	if err := metadata.Set(main, wt, "purpose", "collision-safe"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := metadata.Get(main, wt, "purpose")
+	if got != "collision-safe" {
+		t.Fatalf("got %q, want %q", got, "collision-safe")
+	}
+
+	data, err := os.ReadFile(filepath.Join(main, ".git", "worktrees", "same1", "gw_metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "purpose=collision-safe\n" {
+		t.Fatalf("unexpected metadata content: %q", string(data))
+	}
+
+	if _, err := os.Stat(filepath.Join(main, ".git", "worktrees", "same", "gw_metadata")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected legacy metadata file created: %v", err)
 	}
 }
