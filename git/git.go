@@ -71,19 +71,21 @@ func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
 
 	var entries []WorktreeEntry
 	var current WorktreeEntry
-	inEntry := false
+
+	flush := func() {
+		if current.Path == "" {
+			return
+		}
+		entries = append(entries, current)
+		current = WorktreeEntry{}
+	}
 
 	for line := range strings.SplitSeq(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
-			if inEntry {
-				entries = append(entries, current)
-				current = WorktreeEntry{}
-				inEntry = false
-			}
+			flush()
 			continue
 		}
-		inEntry = true
 		switch {
 		case strings.HasPrefix(line, "worktree "):
 			current.Path = strings.TrimPrefix(line, "worktree ")
@@ -101,9 +103,7 @@ func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
 			current.Branch = "(bare)"
 		}
 	}
-	if inEntry {
-		entries = append(entries, current)
-	}
+	flush()
 	return entries, nil
 }
 
