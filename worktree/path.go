@@ -3,17 +3,23 @@
 package worktree
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 )
 
 // ShortenName normalizes a task name for use as a directory name.
+// Names exceeding 20 chars are truncated to 12 chars + "__" + 6-char SHA-256 fragment
+// derived from the original name, avoiding collisions among names sharing a long prefix.
 func ShortenName(name string) string {
 	s := strings.ReplaceAll(name, "/", "-")
-	if len(s) > 20 {
-		s = s[:18] + "__"
+	if len(s) <= 20 {
+		return s
 	}
-	return s
+	h := sha256.Sum256([]byte(name))
+	fragment := hex.EncodeToString(h[:])[:6]
+	return s[:12] + "__" + fragment // 12 + 2 + 6 = 20
 }
 
 // BaseDir returns the worktree base directory: {parent}/{repo}-wt
