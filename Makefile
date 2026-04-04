@@ -1,6 +1,12 @@
 .PHONY: all build test lint fmt fmt-check check clean
 
 BIN := ./bin/gw
+TMPDIR := $(CURDIR)/tmp
+GOCACHE ?= $(TMPDIR)/gocache
+GOLANGCI_LINT_CACHE ?= $(TMPDIR)/golangci-lint-cache
+
+export GOCACHE
+export GOLANGCI_LINT_CACHE
 
 all: build check
 
