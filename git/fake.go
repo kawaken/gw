@@ -1,6 +1,9 @@
 package git
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // FakeRunner is a test double for Runner that returns canned responses.
 type FakeRunner struct {
@@ -12,14 +15,7 @@ type FakeRunner struct {
 }
 
 func (f *FakeRunner) key(args []string) string {
-	var b strings.Builder
-	for i, a := range args {
-		if i > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(a)
-	}
-	return b.String()
+	return strings.Join(args, " ")
 }
 
 // Run returns the canned response for the given args.
@@ -30,7 +26,10 @@ func (f *FakeRunner) Run(args ...string) (string, error) {
 			return "", err
 		}
 	}
-	return f.Responses[k], nil
+	if out, ok := f.Responses[k]; ok {
+		return out, nil
+	}
+	return "", fmt.Errorf("fake runner: unexpected command %q", k)
 }
 
 // RunIn delegates to Run (dir is ignored in tests).

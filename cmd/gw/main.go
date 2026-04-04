@@ -34,17 +34,17 @@ func run(args []string) int {
 	g := git.New()
 
 	switch cmd {
-	case "list", "ls":
+	case "list":
 		return subcmd.List(g, rest)
-	case "describe", "desc":
+	case "describe":
 		return subcmd.Describe(g, rest)
 	case "__completion":
 		return subcmd.Completion(g, rest)
-	// Phase 2 stubs – not yet implemented
-	case "create", "cr",
-		"remove", "rm",
-		"switch", "sw",
-		"review", "pr",
+	// Phase 2 stub commands, matched on canonical names after alias resolution.
+	case "create",
+		"remove",
+		"switch",
+		"review",
 		"prune",
 		"archive",
 		"activate",

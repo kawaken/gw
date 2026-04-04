@@ -47,7 +47,7 @@ func runGit(dir string, args ...string) (string, error) {
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(errBuf.String()))
 	}
-	return strings.TrimRight(out.String(), "\n"), nil
+	return strings.TrimSpace(out.String()), nil
 }
 
 // New returns a CLI Runner.
@@ -81,30 +81,47 @@ func ListWorktrees(g Runner) ([]WorktreeEntry, error) {
 	}
 
 	for line := range strings.SplitSeq(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
 			flush()
 			continue
 		}
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			current.Path = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "HEAD "):
-			current.HEAD = strings.TrimPrefix(line, "HEAD ")
-		case strings.HasPrefix(line, "branch "):
-			ref := strings.TrimPrefix(line, "branch ")
-			// refs/heads/feature/auth → feature/auth
-			ref = strings.TrimPrefix(ref, "refs/heads/")
-			ref = strings.TrimPrefix(ref, "refs/")
-			current.Branch = "[" + ref + "]"
-		case line == "detached":
-			current.Branch = "(detached HEAD)"
-		case line == "bare":
-			current.Branch = "(bare)"
+
+		key, value, ok := strings.Cut(trimmedLine, " ")
+		if !ok {
+			switch key {
+			case "detached":
+				current.Branch = "(detached HEAD)"
+			case "bare":
+				current.Branch = "(bare)"
+			}
+			continue
+		}
+
+		switch key {
+		case "worktree":
+			current.Path = value
+		case "HEAD":
+			current.HEAD = value
+		case "branch":
+			current.Branch = "[" + shortRef(value) + "]"
 		}
 	}
 	flush()
 	return entries, nil
+}
+
+func shortRef(ref string) string {
+	parts := strings.SplitN(ref, "/", 3)
+	length := len(parts)
+
+	if length == 3 && parts[0] == "refs" && parts[1] == "heads" {
+		return parts[2]
+	}
+	if parts[0] == "refs" {
+		return strings.Join(parts[1:], "/")
+	}
+	return ref
 }
 
 // MainWorktreePath returns the path of the main (first) worktree.
