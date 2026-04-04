@@ -14,22 +14,19 @@ type FakeRunner struct {
 	Errors map[string]error
 }
 
-func (f *FakeRunner) key(args []string) string {
-	return strings.Join(args, " ")
-}
-
 // Run returns the canned response for the given args.
 func (f *FakeRunner) Run(args ...string) (string, error) {
-	k := f.key(args)
-	if f.Errors != nil {
-		if err, ok := f.Errors[k]; ok {
-			return "", err
-		}
+	key := strings.Join(args, " ")
+
+	if err, ok := f.Errors[key]; ok {
+		return "", err
 	}
-	if out, ok := f.Responses[k]; ok {
+
+	if out, ok := f.Responses[key]; ok {
 		return out, nil
 	}
-	return "", fmt.Errorf("fake runner: unexpected command %q", k)
+
+	return "", fmt.Errorf("fake runner: unexpected command %q", key)
 }
 
 // RunIn delegates to Run (dir is ignored in tests).
