@@ -137,21 +137,16 @@ func MainWorktreePath(g Runner) (string, error) {
 }
 
 // DefaultBranch returns the default branch name from origin/HEAD.
-// Falls back to "main" then "master" if origin/HEAD is not determinable.
 func DefaultBranch(g Runner) (string, error) {
 	out, err := g.Run("symbolic-ref", "refs/remotes/origin/HEAD")
-	if err == nil {
-		ref := strings.TrimSpace(out)
-		// refs/remotes/origin/feature/auth → feature/auth
-		branch, ok := strings.CutPrefix(ref, "refs/remotes/origin/")
-		if !ok || branch == "" {
-			return "", fmt.Errorf("unexpected origin/HEAD ref: %q", ref)
-		}
-		return branch, nil
+	if err != nil {
+		return "", fmt.Errorf("resolve origin/HEAD: %w", err)
 	}
-	// fallback: check if main exists
-	if _, err := g.Run("show-ref", "--verify", "--quiet", "refs/heads/main"); err == nil {
-		return "main", nil
+
+	ref := strings.TrimSpace(out)
+	branch, ok := strings.CutPrefix(ref, "refs/remotes/origin/")
+	if !ok || branch == "" {
+		return "", fmt.Errorf("unexpected origin/HEAD ref: %q", ref)
 	}
-	return "master", nil
+	return branch, nil
 }
