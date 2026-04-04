@@ -2,6 +2,8 @@ package subcmd
 
 import (
 	"flag"
+	"fmt"
+	"strings"
 
 	"github.com/kawaken/gw/git"
 	"github.com/kawaken/gw/metadata"
@@ -60,7 +62,13 @@ func Describe(g git.Runner, args []string) int {
 		output.Errorf("describe: failed to read metadata: %v", err)
 		return 1
 	}
-	branch, _ := g.RunIn(wtPath, "branch", "--show-current")
+	branch, err := g.RunIn(wtPath, "branch", "--show-current")
+	branch = strings.TrimSpace(branch)
+	if err != nil {
+		branch = fmt.Sprintf("(unknown: %v)", err)
+	} else if branch == "" {
+		branch = "(detached)"
+	}
 
 	msgs := []string{
 		"path: " + wtPath,
@@ -71,7 +79,9 @@ func Describe(g git.Runner, args []string) int {
 	}
 	if pn := m["pr_number"]; pn != "" {
 		msgs = append(msgs, "pr_number: "+pn)
-		msgs = append(msgs, "pr_url: "+m["pr_url"])
+		if prURL := m["pr_url"]; prURL != "" {
+			msgs = append(msgs, "pr_url: "+prURL)
+		}
 	}
 
 	output.Print(output.Result{Messages: msgs})
