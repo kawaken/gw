@@ -126,10 +126,11 @@ func DefaultBranch(g Runner) (string, error) {
 	if err == nil {
 		ref := strings.TrimSpace(out)
 		// refs/remotes/origin/feature/auth → feature/auth
-		if branch, ok := strings.CutPrefix(ref, "refs/remotes/origin/"); ok {
-			return branch, nil
+		branch, ok := strings.CutPrefix(ref, "refs/remotes/origin/")
+		if !ok || branch == "" {
+			return "", fmt.Errorf("unexpected origin/HEAD ref: %q", ref)
 		}
-		return "", fmt.Errorf("unexpected origin/HEAD ref: %q", ref)
+		return branch, nil
 	}
 	// fallback: check if main exists
 	if _, err := g.Run("show-ref", "--verify", "--quiet", "refs/heads/main"); err == nil {
