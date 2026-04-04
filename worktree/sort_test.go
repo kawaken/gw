@@ -1,11 +1,14 @@
 package worktree_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/kawaken/gw/git"
 	"github.com/kawaken/gw/worktree"
 )
+
+var errLogUnavailable = errors.New("log unavailable")
 
 const porcelainTwo = `worktree /repo/myapp
 HEAD aaa
@@ -92,6 +95,50 @@ branch refs/heads/empty
 	}
 }
 
+func TestSortedLogErrorSortsLast(t *testing.T) {
+	t.Parallel()
+
+	g := &git.FakeRunner{
+		Responses: map[string]string{
+			"worktree list --porcelain": `worktree /repo/myapp
+HEAD aaa
+branch refs/heads/main
+
+worktree /repo/myapp-wt/broken
+HEAD 111
+branch refs/heads/broken
+`,
+			"log -1 --format=%ct %cr": "100 1 day ago",
+		},
+	}
+	gErr := &errorLogFake{
+		base: g,
+		errPaths: map[string]bool{
+			"/repo/myapp-wt/broken": true,
+		},
+	}
+
+	entries, err := worktree.Sorted(gErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 entries, got %d", len(entries))
+	}
+	if entries[0].Path != "/repo/myapp" {
+		t.Errorf("expected main first, got %q", entries[0].Path)
+	}
+	if entries[1].Path != "/repo/myapp-wt/broken" {
+		t.Errorf("expected broken last, got %q", entries[1].Path)
+	}
+	if entries[1].Timestamp != 0 {
+		t.Errorf("expected zero timestamp for broken worktree, got %d", entries[1].Timestamp)
+	}
+	if entries[1].Age != "" {
+		t.Errorf("expected empty age for broken worktree, got %q", entries[1].Age)
+	}
+}
+
 // orderedFake returns different timestamps per worktree path.
 type orderedFake struct{}
 
@@ -127,6 +174,20 @@ func (f *mixedLogFake) Toplevel() (string, error)          { return f.base.Tople
 func (f *mixedLogFake) RunIn(dir string, args ...string) (string, error) {
 	if v, ok := f.overrides[dir]; ok {
 		return v, nil
+	}
+	return f.base.Run(args...)
+}
+
+type errorLogFake struct {
+	base     *git.FakeRunner
+	errPaths map[string]bool
+}
+
+func (f *errorLogFake) Run(args ...string) (string, error) { return f.base.Run(args...) }
+func (f *errorLogFake) Toplevel() (string, error)          { return f.base.Toplevel() }
+func (f *errorLogFake) RunIn(dir string, args ...string) (string, error) {
+	if f.errPaths[dir] {
+		return "", errLogUnavailable
 	}
 	return f.base.Run(args...)
 }

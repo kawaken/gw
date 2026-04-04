@@ -26,7 +26,15 @@ func Sorted(g git.Runner) ([]Entry, error) {
 
 	entries := make([]Entry, 0, len(wts))
 	for _, wt := range wts {
-		out, _ := g.RunIn(wt.Path, "log", "-1", "--format=%ct %cr")
+		out, err := g.RunIn(wt.Path, "log", "-1", "--format=%ct %cr")
+		if err != nil {
+			// Empty or otherwise unreadable worktrees sort last, but still appear in output.
+			entries = append(entries, Entry{
+				Path:   wt.Path,
+				Branch: wt.Branch,
+			})
+			continue
+		}
 		ts, age := parseLogOutput(out)
 		entries = append(entries, Entry{
 			Path:      wt.Path,
