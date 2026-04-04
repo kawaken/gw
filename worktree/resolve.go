@@ -19,7 +19,7 @@ func Resolve(g git.Runner, query string) (string, error) {
 		return "", fmt.Errorf("resolve worktree: %w", err)
 	}
 
-	if query == "" || query == "main" {
+	if query == "" || query == mainLabel {
 		return mainPath, nil
 	}
 

@@ -8,10 +8,10 @@ import (
 	"github.com/kawaken/gw/metadata"
 )
 
-func setupLinkedWorktree(t *testing.T, adminDirName, wtPath string) (mainRepo string) {
+func setupLinkedWorktree(t *testing.T, adminDirName, wtPath string) string {
 	t.Helper()
 	dir := t.TempDir()
-	mainRepo = filepath.Join(dir, "myapp")
+	mainRepo := filepath.Join(dir, "myapp")
 	adminDir := filepath.Join(mainRepo, ".git", "worktrees", adminDirName)
 
 	if err := os.MkdirAll(adminDir, 0o750); err != nil {

@@ -48,7 +48,7 @@ func FormatLine(info FormatInfo, mode FormatMode) string {
 	branchName := strings.Trim(info.Branch, "[]")
 	showBranch := true
 	switch {
-	case info.Label == "main" && branchName == "main":
+	case info.Label == mainLabel && branchName == mainLabel:
 		showBranch = false
 	case info.OriginalBranch != "" && branchName == info.OriginalBranch:
 		showBranch = false

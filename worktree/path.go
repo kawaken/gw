@@ -9,6 +9,9 @@ import (
 	"strings"
 )
 
+// mainLabel is the label and task name used to identify the main worktree.
+const mainLabel = "main"
+
 // ShortenName normalizes a task name for use as a directory name.
 // Names exceeding 20 chars are truncated to 12 chars + "__" + 6-char SHA-256 fragment
 // derived from the original name, avoiding collisions among names sharing a long prefix.
@@ -39,7 +42,7 @@ func BaseDir(mainRepoPath, configDir string) string {
 // Path returns the full path for a task worktree.
 // If taskName is empty or "main", returns mainRepoPath.
 func Path(mainRepoPath, configDir, taskName string) string {
-	if taskName == "" || taskName == "main" {
+	if taskName == "" || taskName == mainLabel {
 		return mainRepoPath
 	}
 	short := ShortenName(taskName)
@@ -50,7 +53,7 @@ func Path(mainRepoPath, configDir, taskName string) string {
 // If it IS the main repo, the label is "main". Otherwise the label is the basename.
 func MakeLabel(wtPath, mainRepoPath string) string {
 	if wtPath == mainRepoPath {
-		return "main"
+		return mainLabel
 	}
 	return filepath.Base(wtPath)
 }

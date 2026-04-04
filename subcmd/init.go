@@ -68,7 +68,10 @@ func Init(args []string) int {
 	}
 	switch shell {
 	case "zsh":
-		_, _ = os.Stdout.WriteString(shellWrapper)
+		if _, err := os.Stdout.WriteString(shellWrapper); err != nil {
+			fmt.Fprintf(os.Stderr, "gw init: write: %v\n", err)
+			return 1
+		}
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "gw init: unsupported shell %q (supported: zsh)\n", shell)

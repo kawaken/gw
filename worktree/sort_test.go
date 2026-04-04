@@ -10,6 +10,8 @@ import (
 
 var errLogUnavailable = errors.New("log unavailable")
 
+const testMainRepoPath = "/repo/myapp"
+
 const porcelainTwo = `worktree /repo/myapp
 HEAD aaa
 branch refs/heads/main
@@ -45,7 +47,7 @@ func TestSorted(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
 	// Newest first: task-2 (200), task-1 (100), main (50)
-	want := []string{"/repo/myapp-wt/task-2", "/repo/myapp-wt/task-1", "/repo/myapp"}
+	want := []string{"/repo/myapp-wt/task-2", "/repo/myapp-wt/task-1", testMainRepoPath}
 	for i, e := range entries {
 		if e.Path != want[i] {
 			t.Errorf("entries[%d].Path = %q, want %q", i, e.Path, want[i])
@@ -87,7 +89,7 @@ branch refs/heads/empty
 		t.Fatalf("expected at least 2 entries, got %d", len(entries))
 	}
 	// main (ts=100) should come before empty (ts=0)
-	if entries[0].Path != "/repo/myapp" {
+	if entries[0].Path != testMainRepoPath {
 		t.Errorf("expected main first, got %q", entries[0].Path)
 	}
 	if entries[1].Path != "/repo/myapp-wt/empty" {
@@ -125,7 +127,7 @@ branch refs/heads/broken
 	if len(entries) < 2 {
 		t.Fatalf("expected at least 2 entries, got %d", len(entries))
 	}
-	if entries[0].Path != "/repo/myapp" {
+	if entries[0].Path != testMainRepoPath {
 		t.Errorf("expected main first, got %q", entries[0].Path)
 	}
 	if entries[1].Path != "/repo/myapp-wt/broken" {
@@ -151,7 +153,7 @@ func (f *orderedFake) Run(args ...string) (string, error) {
 
 func (f *orderedFake) RunIn(dir string, _ ...string) (string, error) {
 	ts := map[string]string{
-		"/repo/myapp":           "50 3 weeks ago",
+		testMainRepoPath:        "50 3 weeks ago",
 		"/repo/myapp-wt/task-1": "100 1 day ago",
 		"/repo/myapp-wt/task-2": "200 2 hours ago",
 	}
@@ -161,7 +163,7 @@ func (f *orderedFake) RunIn(dir string, _ ...string) (string, error) {
 	return "", nil
 }
 
-func (f *orderedFake) Toplevel() (string, error) { return "/repo/myapp", nil }
+func (f *orderedFake) Toplevel() (string, error) { return testMainRepoPath, nil }
 
 // mixedLogFake overrides RunIn for specific paths.
 type mixedLogFake struct {

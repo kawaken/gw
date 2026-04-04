@@ -31,7 +31,27 @@ linters:
     - thelper      # テストヘルパーの t.Helper() を強制
     - noctx        # context なしの exec.Command などを検出
     - paralleltest # 並列実行可能なテストに t.Parallel() を要求
+    # バグ防止
+    - forcetypeassert # .(T) 型アサートの panic バグを検出
+    - fatcontext      # ループ内 context ネストによるメモリリーク検出
+    - durationcheck   # duration * duration のような計算ミスを検出
+    - asasalint       # ...any に []any を渡すバグ検出
+    - mirror          # bytes/strings の誤使用を検出
+    - recvcheck       # レシーバ型の一貫性チェック
+    - contextcheck    # 非継承 context の使用を検出
+    - intrange        # for i := range n への統一
+    # コード品質
+    - unparam       # 未使用パラメータを検出
+    - nestif        # 深すぎる if ネストを検出
+    - nonamedreturns # 名前付き戻り値を禁止
+    - errname       # エラー型名の命名規則
+    - goconst       # 同じ文字列リテラルの繰り返しを検出
+    - dupword       # コメント内の重複単語を検出
+    - whitespace    # 不要な空行を検出
+    - usetesting    # テストで os.Setenv → t.Setenv 等を強制
   settings:
+    errcheck:
+      check-blank: true  # _ = func() のエラー無視を検出
     gosec:
       excludes:
         - G204  # subprocess with variable: 常に "git" を呼ぶため誤検知
