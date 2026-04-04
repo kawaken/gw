@@ -18,9 +18,11 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: false
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.10.1
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.10.1
+      - run: make lint
 
   test:
     name: Test
@@ -32,7 +34,7 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: true
-      - run: go test ./... -v -race -count=1
+      - run: make test
 
   build:
     name: Build
@@ -44,4 +46,4 @@ jobs:
         with:
           go-version-file: "go.mod"
           cache: true
-      - run: go build ./cmd/gw/
+      - run: make build
