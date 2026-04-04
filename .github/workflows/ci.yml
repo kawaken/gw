@@ -21,7 +21,7 @@ jobs:
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.10.1
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
       - run: make lint
 
   test:
