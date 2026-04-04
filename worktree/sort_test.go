@@ -80,6 +80,9 @@ branch refs/heads/empty
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 entries, got %d", len(entries))
+	}
 	// main (ts=100) should come before empty (ts=0)
 	if entries[0].Path != "/repo/myapp" {
 		t.Errorf("expected main first, got %q", entries[0].Path)
