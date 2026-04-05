@@ -1,0 +1,28 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/gw
+bin/
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+coverage.html
+tmp/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Environment
+.env
+
+.claude/settings.local.json
