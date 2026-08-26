@@ -1,93 +1,68 @@
-# gw 観測・状態管理ツール計画
+# gw 観測・状態管理ツール
 
-## 1. 方針
+## 1. 目的
 
-`gw` は、Git worktree の作成・削除を所有するツールではなく、既存の worktree と、その作業状態を観測・管理するツールにする。
+`gw` は、Git worktree とその作業状態を観測し、不要になった worktree の整理を支援する CLI です。
 
-当初は `gw` が worktree のライフサイクル全体を管理し、その中でコーディングエージェントを起動する想定だった。しかし現在は Claude Code や Codex などのエージェントが、それぞれの作法・配置・セッション管理で worktree を扱う。
-
-そのため、worktree 単体の作成・削除はエージェントに任せ、`gw` は以下を担当する。
+担当するのは次の範囲です。
 
 - Git worktree の状態把握
-- GitHub PR との関連付け
-- Claude Code / Codex セッション状態の観測
-- 放置された worktree の cleanup 候補判定
-- 安全性の高い cleanup の実行
+- GitHub pull request との関連付け
+- Claude Code / Codex のセッション状態の観測
+- cleanup 候補の判定
+- 安全条件を満たす worktree の削除
 
-## 2. 設計原則
+worktree の作成や通常の開発セッション管理は、それぞれの開発ツールに任せます。
+
+## 2. 設計
 
 - Go の単体バイナリとして動作する
-- シェル関数による `cd` ラッパーは持たない
-- 単一リポジトリを対象にする
+- 1回の実行では、現在の Git リポジトリに紐づく worktree を対象にする
 - `git worktree list --porcelain` で発見できる worktree を対象にする
 - `.git` や worktree 内に独自メタデータを書き込まない
-- 人間向けの通常 CLI と、エージェント向けの `--json` 出力を提供する
-- GitHub やエージェント情報が取得できない場合も、Git の情報だけで動作する
-- MCP は実装しない
-- 取得できない情報は推測せず `unknown` とする
+- 人間向けの通常出力と、`--json` による構造化出力を提供する
+- GitHub やエージェント情報が取得できない場合も、Git の情報を返す
+- 取得できない情報は推測せず、`unknown` として扱う
 
-## 3. コマンド体系
+## 3. CLI
 
-### 通常コマンド
+### 状態確認
 
 ```text
-gw list
-gw list --json
-gw inspect <worktree>
-gw inspect <worktree> --json
-gw refresh
-gw clean --dry-run
-gw clean
+gw list [--json]
+gw inspect [<worktree>] [--json]
+gw refresh [--json]
 ```
 
-- `list`: worktree ごとの Git・GitHub・エージェント状態を一覧表示する
-- `inspect`: 1つの worktree の状態と判定理由を詳細表示する
-- `refresh`: GitHub など外部状態を再取得し、状態を更新する
-- `clean --dry-run`: cleanup 対象を表示するが、削除しない
-- `clean`: cleanup 推奨対象だけを削除する
+`list` は worktree の状態を一覧表示し、`inspect` は指定した worktree の詳細と cleanup 判定理由を表示します。`inspect` の引数を省略するとメイン worktree を対象にします。
 
-`clean` は worktree 本体だけを削除し、ブランチは初期版では残す。worktree の削除には `git worktree remove` を使う。dirty な worktree、現在の worktree、エージェントが active な worktree は削除しない。
+`refresh` は Git と利用可能な連携先から現在の状態を再取得します。結果を永続化する更新処理ではありません。
 
-`git worktree prune` は、すでに存在しない worktree に対応する Git 管理情報の掃除に使えるが、実際の worktree ディレクトリを削除する cleanup 本体とは区別する。
+### cleanup
 
-### `guide` コマンド
+```text
+gw clean --dry-run [--json]
+gw clean [--json]
+```
 
-`guide` を AI 向けの公式な説明入口にする。
+`--dry-run` は削除候補を表示するだけで、worktree を削除しません。通常の `clean` は `recommended` と判定された worktree に対して `git worktree remove` を実行します。
+
+### ガイドと内部コマンド
 
 ```text
 gw guide
-gw guide list
-gw guide inspect
-gw guide clean
-gw guide json
-gw guide agent-hook claude
-gw guide agent-hook codex
+gw guide list|inspect|clean|json
+gw guide agent-hook claude|codex
+gw agent-event --provider claude|codex
 ```
 
-`gw help` のコマンド一覧には、次のような説明を出す。
-
-```text
-guide  AI向けに各サブコマンドの使い方や連携方法を説明
-```
-
-`guide` はファイルを変更せず、現在のバイナリが対応している使い方・JSON仕様・安全条件・hook設定例を表示する。
-
-特に `gw guide agent-hook claude` / `gw guide agent-hook codex` は、既存の設定を自動編集せず、ユーザーが追加すべき設定と確認方法を説明する。
-
-### 内部コマンド
-
-```text
-gw agent-event --provider claude
-gw agent-event --provider codex
-```
-
-`agent-event` は Claude Code / Codex の hook から JSON を stdin で受け取る内部用コマンド。通常の help 一覧には表示せず、`gw guide agent-hook ...` から説明する。
+`guide` は現在のバイナリが対応している使い方、JSON出力、安全条件、agent hook の設定例を表示します。`agent-event` は Claude Code / Codex の hook から呼び出す内部コマンドです。
 
 ## 4. JSON 出力
 
-主要な状態取得コマンドは `--json` をサポートする。人間向け出力も JSON と同じ内部データを表示する。
+`list`、`inspect`、`refresh` は `--json` に対応しています。`clean` は dry-run と削除実行の結果を、それぞれ `CleanupReport` として返します。
 
-トップレベルの構造は次を基本とする。
+状態取得結果のトップレベルは次の構造です。
 
 ```json
 {
@@ -99,223 +74,77 @@ gw agent-event --provider codex
 }
 ```
 
-worktree には少なくとも次を含める。
+worktree には `path`、`branch`、`head`、`detached`、`locked` と、次の状態を含みます。
 
-```json
-{
-  "path": "/path/to/worktree",
-  "branch": "feature/example",
-  "head": "abc1234",
-  "git": {
-    "clean": true,
-    "ahead": 0,
-    "behind": 0
-  },
-  "github": {
-    "pr": null
-  },
-  "agent": {
-    "provider": null,
-    "session_id": null,
-    "lifecycle": "unknown",
-    "activity": "unknown"
-  },
-  "cleanup": {
-    "recommendation": "review",
-    "reasons": []
-  }
-}
-```
+- `git`: clean / dirty、upstreamとの差分、最終コミット時刻
+- `github`: pull request と取得状態
+- `agent`: provider、session ID、lifecycle、activity、観測時刻
+- `cleanup`: `recommended` / `review` / `keep` と判定理由
 
-JSON の方針:
+値を取得できない場合は、空文字ではなく `null` または `unknown` を使います。GitHub や agent のエラーがあっても、Git の結果は可能な限り返します。
 
-- `schema_version` を必ず含める
-- 取得不能な値は空文字ではなく `null` または `unknown`
-- GitHub や agent のエラーで Git の結果を失わない
-- cleanup 判定の根拠を安定したコードで返す
-- 時刻は ISO 8601 形式にする
+`clean --json` の結果には `schema_version`、`repository`、`mode`、`candidates`、`removed`、`errors` が含まれます。
 
-## 5. Git 状態
+## 5. GitHub 連携
 
-Git から以下を取得する。
+GitHub の情報取得には `gh` CLI を使用します。ブランチをもとに pull request を検索し、番号、タイトル、状態、URL、merge 時刻などを取得します。
 
-- worktree のパス
-- ブランチ名、detached HEAD
-- HEAD
-- clean / dirty
-- ahead / behind
-- 最終コミット時刻
-- worktree 管理情報の異常
+`gh` がない、認証できない、通信に失敗したなどの場合は、GitHub の状態を `unknown` または `unavailable` として扱います。GitHub の結果はキャッシュせず、各状態取得時に再取得します。
 
-独立した clone や `git worktree list` から発見できないディレクトリは、初期版の管理対象外とする。
+## 6. エージェントセッション
 
-## 6. GitHub 状態
+Claude Code と Codex の `SessionStart` / `SessionEnd` hook を利用します。hook の標準入力から provider、session ID、cwd、イベント名、終了理由、観測時刻などを受け取り、セッション状態を更新します。
 
-GitHub 情報は `gh` CLI を利用できる場合のみ取得する。`gh` が存在しない、未ログイン、通信エラーなどの場合は `unknown` とする。
+同じ provider と session ID の記録は上書きする snapshot 方式です。transcript の内容は解析しません。
 
-ブランチを基本キーとして PR を関連付け、次を取得する。
+現在の lifecycle は `active`、`ended`、`unknown`、activity は `unknown` です。hook が設定されていない場合や状態を取得できない場合も `unknown` として扱います。
 
-- PR 番号、タイトル、URL
-- open / closed / merged
-- merge 時刻
-- remote branch の存在
+## 7. cleanup 判定
 
-GitHub の状態取得はローカル Git の状態と分離し、外部取得に失敗しても `gw list` 自体は成功させる。
-
-## 7. エージェントセッション
-
-Herdr などの外部セッションマネージャーには依存しない。
-
-Claude Code と Codex が提供する公式 hook を利用する。hook から受け取ったイベントを `gw agent-event` が保存する。
-
-利用するイベントは基本的に次の2つ。
-
-- `SessionStart`
-- `SessionEnd`
-
-hook の入力から次を保存する。
-
-- provider
-- session ID
-- worktree / cwd
-- transcript path（参照先として必要な場合のみ）
-- event name
-- 終了理由
-- 観測時刻
-
-transcript の内容は解析しない。transcript はエージェントとの会話、tool 呼び出し、結果などを記録したファイルであり、形式変更や機密情報の問題があるため、cleanup 判定の情報源にはしない。
-
-セッション状態は、Git の状態と分離して以下のように扱う。
-
-```text
-lifecycle: active | ended | unknown
-activity:  working | waiting | unknown
-```
-
-正常終了時に `SessionEnd` を受け取れない場合は `ended` と断定せず `unknown` とする。セッション終了だけで worktree の削除を決定せず、Git / GitHub 状態と組み合わせる。
-
-## 8. 状態保存
-
-XDG の標準ディレクトリを利用する。
-
-```text
-${XDG_CONFIG_HOME:-~/.config}/gw/
-  config.toml       # ユーザー設定、ignore、cleanup設定
-
-${XDG_STATE_HOME:-~/.local/state}/gw/
-  sessions.json     # agent hook から得たセッション状態
-  observations.json # 必要に応じた観測状態
-
-${XDG_CACHE_HOME:-~/.cache}/gw/
-  github/           # 再取得可能な GitHub キャッシュ
-```
-
-初期版では、Git から再取得できる情報は永続保存せず、agent event やユーザーの ignore など再取得できない情報だけを保存する方針を基本とする。
-
-## 9. cleanup 判定
-
-cleanup 判定は `recommended` / `review` / `keep` の3段階とする。
+判定は次の3段階です。
 
 ### recommended
 
-次のような強い終了根拠があり、worktree が clean で、active な agent session がない場合。
-
-- PR が merged
-- PR が closed
-- ブランチが削除済み
+pull request が `MERGED` または `CLOSED` で、worktree が clean、active なエージェントセッションがない場合です。
 
 ### review
 
-- 一定期間更新がない
-- dirty な worktree
-- GitHub 状態が `unknown`
-- agent session が `unknown` または再開可能
-- セッションは終了しているが、PR やブランチの状態が不明
+dirty な worktree、pull request がないもの、open の pull request、GitHub の状態が不明なものなどです。自動削除しません。
 
 ### keep
 
-- 現在の worktree
-- Git の状態取得に失敗している
-- active な agent session が存在する
+メイン worktree、ロックされた worktree、active なエージェントセッションがあるものです。
 
-`gw clean` は `recommended` のみをデフォルトで削除する。`review` は削除しない。
+`gw clean` が削除するのは `recommended` の worktree だけです。worktree を削除しても、ブランチは削除しません。
 
-初期版ではブランチを削除しない。必要になった場合に、マージ済みブランチだけを対象とする明示的なオプションを追加する。
+## 8. 状態保存
 
-## 10. 設定ガイド
+エージェントセッションの状態だけを XDG Base Directory に保存します。
 
-`gw guide agent-hook claude` と `gw guide agent-hook codex` は、次を表示する。
+```text
+${XDG_STATE_HOME:-~/.local/state}/gw/sessions.json
+```
 
-- 設定ファイルの場所
-- `SessionStart` / `SessionEnd` に追加する hook の例
-- `gw agent-event` の役割
-- 既存の hook を壊さずに手動マージする方法
-- 動作確認方法
-- 設定を戻す方法
+設定ファイル、GitHub キャッシュ、観測結果の永続保存は現在使用していません。
 
-既存設定の自動上書きは行わない。
+## 9. 実装状況
 
-## 11. 実装フェーズ
+- CLI の基本コマンド、help、guide: 実装済み
+- Git worktree と Git 状態の観測: 実装済み
+- JSON 出力とエラー情報: 実装済み
+- GitHub pull request 連携: 実装済み
+- Claude Code / Codex の agent hook 連携: 実装済み
+- cleanup 候補の判定と `git worktree remove`: 実装済み
+- TUI、複数リポジトリ横断、自動 daemon、MCP: 対象外
 
-### Phase 1: CLI基盤とローカルGit観測
+## 10. 今後の検討事項
 
-- Go 単体CLIの骨格
-- `help` / `guide`
-- `list` / `inspect`
-- `git worktree list --porcelain` の解析
-- Git状態のJSON出力
-- XDGパスの解決
+現時点で仕様を決め切っていないものは、必要になった時点で検討します。
 
-### Phase 2: JSON仕様と説明ガイド
+- JSON の全フィールドと列挙値を、外部向けの正式な仕様として固定するか
+- リポジトリごとの設定や ignore が必要か。その場合の設定ファイル形式
+- GitHub の問い合わせが増えた場合のキャッシュと有効期限
+- cleanup の一部失敗時に終了コードを非ゼロにするか
+- マージ済みブランチを削除する明示的なオプションが必要か
 
-- `schema_version` と状態モデルの固定
-- `--json` の共通出力
-- `guide json`
-- エラー・終了コードの整理
-
-### Phase 3: GitHub連携
-
-- `gh` の存在確認
-- PR検索・状態取得
-- `unknown` と部分的エラーの扱い
-- `refresh`
-
-### Phase 4: Agent hook連携
-
-- `agent-event`
-- Claude / Codex のイベント形式解析
-- セッション状態の保存
-- `guide agent-hook claude|codex`
-- hook未設定時の `unknown` 表示
-
-### Phase 5: cleanup
-
-- `clean --dry-run`
-- 推奨・要確認・維持の判定
-- `git worktree remove`
-- dirty / current / active session の保護
-
-## 12. 対象外
-
-初期版では次を実装しない。
-
-- TUI
-- 複数リポジトリ横断管理
-- worktree の作成・削除を主機能にすること
-- transcript の直接解析
-- Claude / Codex 以外のエージェント対応
-- 自動 daemon
-- MCP
-- 初期版でのブランチ削除
-- cleanup ポリシーの細かいリポジトリ別カスタマイズ
-
-## 13. 未決定事項
-
-実装開始前に次を確定する。
-
-- JSON の全フィールド名と列挙値
-- `config.toml` を含む設定ファイルの具体的な形式
-- agent event の保存形式（snapshot / append-only log）
-- GitHub API 呼び出しのキャッシュと有効期限
-- cleanup の終了コードと削除結果のJSON形式
-- Goの標準ライブラリと外部ライブラリの最終選定
+現在の実装は、設定やキャッシュを持たず、取得時に GitHub を再照会する単純な構成です。
