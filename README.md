@@ -1,51 +1,56 @@
-# gw ヘルパースクリプト・Hooks
+# gw
 
-## Hooks
+Git worktree の状態を観測・管理する Go CLI です。
 
-`gw` コマンドは各リポジトリの `.gw/hooks/` に実行可能ファイルを置くことで、ライフサイクルの特定タイミングに処理を挟める。
+worktree の作成や通常の開発セッション管理は Claude Code / Codex などのコーディングエージェントに任せ、`gw` は Git、GitHub PR、エージェントセッションの状態を集約して、放置された worktree の cleanup 候補を判定します。
 
-命名規則: `{event}-{subcommand}`
+## Install
 
-| Hook | タイミング | 引数 |
-|---|---|---|
-| `post-create` | `gw create` でworktree作成後 | `$1`: worktree_path |
-| `post-review` | `gw review` でworktree新規作成後 | `$1`: worktree_path, `$2`: pr_number, `$3`: pr_url |
-| `pre-remove` | `gw remove` でworktree削除前 | `$1`: worktree_path |
+チェックアウトしたリポジトリからインストールします。
 
-### 注意事項
-
-- 既存worktreeへの移動時（`gw review <PR番号>` で既にworktreeが存在する場合）は hook は呼ばれない
-- hookが非ゼロで終了した場合、`post-create` / `pre-remove` はエラー扱いになる
-- `post-review` のエラーは worktree 作成後なので強制はしない
-
-### hook の配置例
-
-```zsh
-# .gw/hooks/post-review
-#!/usr/bin/env zsh
-~/dotfiles/gw/gw-post-review "$@"
+```bash
+go install ./cmd/gw
 ```
 
-## ヘルパースクリプト
+または、バイナリをビルドします。
 
-### `gw-post-review`
+```bash
+go build -o ./gw ./cmd/gw
+```
 
-Claude Code をレビュー専用（plan モード）で起動するヘルパー。`.gw/hooks/post-review` から呼び出す。
+## Commands
 
-**引数**: `<worktree_path> <pr_number> <pr_url>`
+```bash
+gw list                  # worktreeの状態を一覧表示
+gw list --json           # エージェント向けJSON
+gw inspect <worktree>    # 詳細とcleanup判定理由
+gw refresh               # GitHubなどの状態を再取得
+gw clean --dry-run       # cleanup候補を確認
+gw clean                 # 推奨候補だけを削除
+gw guide                 # AI向けの使い方・仕様
+```
 
-- `claude` コマンドが存在しない場合はスキップ
-- `--append-system-prompt` でレビュー専用の指示をシステムプロンプトに追加
-- 初期プロンプトとして PR番号・URLをClaude Codeに渡す
+`gw clean` は、PRがマージ済みまたはクローズ済みで、worktreeがcleanかつactiveなエージェントセッションがないものだけを推奨対象にします。dirtyなworktree、現在のworktree、状態が不明なworktreeは削除しません。初期版ではブランチを残します。
 
-### `gw-claude-trust`
+## Agent hooks
 
-ディレクトリを Claude Code の信頼済みとして `~/.claude.json` に登録する。
+Claude Code / Codex のセッション状態を記録するhook設定は、次のコマンドで確認できます。
 
-**引数**: `<directory>`
+```bash
+gw guide agent-hook claude
+gw guide agent-hook codex
+```
 
-### `gw-sync-edit`
+これらのコマンドは既存設定を変更せず、`SessionStart` / `SessionEnd` に追加する設定例を表示します。
 
-`.gw/config` をfzfで対話的に編集する。
+## Data locations
 
-**引数**: なし（カレントディレクトリのリポジトリを対象）
+設定・状態・キャッシュはXDGディレクトリに保存します。
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/gw/
+${XDG_STATE_HOME:-~/.local/state}/gw/
+${XDG_CACHE_HOME:-~/.cache}/gw/
+```
+
+GitHub情報を取得できない場合や、エージェントhookが設定されていない場合は、該当する状態を `unknown` として扱います。
