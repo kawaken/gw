@@ -1,56 +1,69 @@
 # gw
 
-Git worktree の状態を観測・管理する Go CLI です。
+Git worktree の状態を確認し、不要になった worktree の整理を支援する CLI です。
 
-worktree の作成や通常の開発セッション管理は Claude Code / Codex などのコーディングエージェントに任せ、`gw` は Git、GitHub PR、エージェントセッションの状態を集約して、放置された worktree の cleanup 候補を判定します。
+各 worktree の Git の状態に加えて、GitHub の pull request とコーディングエージェントのセッション状態をまとめて確認できます。
 
-## Install
+## インストール
 
-チェックアウトしたリポジトリからインストールします。
+Go が使える環境では、次のコマンドでインストールできます。
 
-```bash
-go install ./cmd/gw
+```console
+$ go install github.com/kawaken/gw/cmd/gw@latest
 ```
 
-または、バイナリをビルドします。
+## 使い方
 
-```bash
-go build -o ./gw ./cmd/gw
+Git リポジトリ内で実行します。
+
+```console
+$ gw list
+PATH                         BRANCH       GIT    AGENT          CLEANUP
+/path/to/repository          main         clean  unknown        keep
+/path/to/worktree            feature/foo  clean  claude:ended   recommended
 ```
 
-## Commands
+個別の worktree を詳しく確認するには、`inspect` を使います。引数を省略するとメイン worktree を表示します。
 
-```bash
-gw list                  # worktreeの状態を一覧表示
-gw list --json           # エージェント向けJSON
-gw inspect <worktree>    # 詳細とcleanup判定理由
-gw refresh               # GitHubなどの状態を再取得
-gw clean --dry-run       # cleanup候補を確認
-gw clean                 # 推奨候補だけを削除
-gw guide                 # AI向けの使い方・仕様
+```console
+$ gw inspect /path/to/worktree
+$ gw inspect feature/foo
 ```
 
-`gw clean` は、PRがマージ済みまたはクローズ済みで、worktreeがcleanかつactiveなエージェントセッションがないものだけを推奨対象にします。dirtyなworktree、現在のworktree、状態が不明なworktreeは削除しません。初期版ではブランチを残します。
+削除候補は、まず dry-run で確認できます。
 
-## Agent hooks
-
-Claude Code / Codex のセッション状態を記録するhook設定は、次のコマンドで確認できます。
-
-```bash
-gw guide agent-hook claude
-gw guide agent-hook codex
+```console
+$ gw clean --dry-run
+$ gw clean
 ```
 
-これらのコマンドは既存設定を変更せず、`SessionStart` / `SessionEnd` に追加する設定例を表示します。
+`clean` が対象にするのは、pull request がマージ済みまたはクローズ済みで、worktree が clean、かつ実行中のエージェントセッションがないものです。メイン worktree、ロックされた worktree、状態を確認できないものは削除しません。削除されるのは worktree で、ブランチは残ります。
 
-## Data locations
+他のツールから利用する場合は、`--json` を付けると構造化された結果を取得できます。
 
-設定・状態・キャッシュはXDGディレクトリに保存します。
+```console
+$ gw list --json
+$ gw inspect feature/foo --json
+$ gw clean --dry-run --json
+```
+
+## エージェント連携
+
+Claude Code または Codex の hook からセッションの開始・終了を `gw` に通知できます。設定例は次のコマンドで表示されます。
+
+```console
+$ gw guide agent-hook claude
+$ gw guide agent-hook codex
+```
+
+表示された設定を、利用しているエージェントの hook 設定に追加してください。`gw` は既存の設定を変更しません。
+
+GitHub の pull request 情報は `gh` コマンドが利用できる場合に取得します。取得できない情報は推測せず、`unknown` として扱います。
+
+## 状態の保存場所
+
+エージェントセッションの状態は、XDG Base Directory に従って次の場所に保存されます。
 
 ```text
-${XDG_CONFIG_HOME:-~/.config}/gw/
-${XDG_STATE_HOME:-~/.local/state}/gw/
-${XDG_CACHE_HOME:-~/.cache}/gw/
+${XDG_STATE_HOME:-~/.local/state}/gw/sessions.json
 ```
-
-GitHub情報を取得できない場合や、エージェントhookが設定されていない場合は、該当する状態を `unknown` として扱います。
