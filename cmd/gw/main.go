@@ -334,7 +334,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "list", "inspect", "clean", "json":
+	case "list", "inspect", "refresh", "clean", "json":
 		printGuideTopic(stdout, args[0])
 		return 0
 	case "agent-hook":
@@ -346,7 +346,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "gw guide: unknown topic %q\n", args[0])
-		fmt.Fprintln(stderr, "available topics: list, inspect, clean, json, agent-hook claude|codex")
+		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, clean, json, agent-hook claude|codex")
 		return 2
 	}
 }
@@ -853,7 +853,15 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw clean --dry-run [--json]")
 	fmt.Fprintln(w, "- gw clean")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "For details, run gw guide <command>. For agent lifecycle integration, run gw guide agent-hook claude or gw guide agent-hook codex.")
+	fmt.Fprintln(w, "## Guide topics")
+	fmt.Fprintln(w, "- gw guide list")
+	fmt.Fprintln(w, "- gw guide inspect")
+	fmt.Fprintln(w, "- gw guide refresh")
+	fmt.Fprintln(w, "- gw guide clean")
+	fmt.Fprintln(w, "- gw guide json")
+	fmt.Fprintln(w, "- gw guide agent-hook claude|codex")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Run gw guide <topic> for details.")
 }
 
 func printGuideTopic(w io.Writer, topic string) {
@@ -861,21 +869,56 @@ func printGuideTopic(w io.Writer, topic string) {
 	case "list":
 		fmt.Fprintln(w, "# gw list")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "現在のリポジトリに紐づくGit worktreeを一覧表示します。GitHubやagent情報が取れない場合はunknownになります。")
-		fmt.Fprintln(w, "Use --json when another program or coding agent needs structured data.")
-	case "inspect":
-		fmt.Fprintln(w, "# gw inspect <worktree>")
+		fmt.Fprintln(w, "現在のリポジトリに紐づくGit worktreeを一覧表示します。列はPATH、BRANCH、GIT（clean/dirty）、AGENT、CLEANUP（recommended/review/keep）です。")
+		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "指定したworktreeのGit、GitHub、agent、cleanup判定と判定理由を表示します。引数を省略するとmain worktreeを表示します。")
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --json    schema_version、repository、worktrees、sources、errorsを含む構造化出力（詳細は gw guide json）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "個別のworktreeの判定理由まで見たい場合は gw inspect <worktree> を使ってください。")
+	case "inspect":
+		fmt.Fprintln(w, "# gw inspect [<worktree>]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "指定したworktreeのGit、GitHub、agent、cleanup判定と判定理由を表示します。引数を省略するとmain worktreeを対象にします。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --json    対象worktree1件を含む gw list --json と同じResult構造で出力")
+	case "refresh":
+		fmt.Fprintln(w, "# gw refresh")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Gitと、利用可能なGitHub/agentの連携先から現在の状態を再取得して表示します。何かを永続化する更新処理ではありません。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
 	case "clean":
 		fmt.Fprintln(w, "# gw clean")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "recommendedだけを削除します。dirty、現在のworktree、activeなagent sessionは削除しません。")
-		fmt.Fprintln(w, "最初に gw clean --dry-run を実行すると、削除候補と理由を確認できます。初期版ではブランチを削除しません。")
+		fmt.Fprintln(w, "cleanup判定がrecommendedのworktreeにgit worktree removeを実行します。dirty、現在のworktree、activeなagent sessionは削除しません。ブランチは削除しません。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --dry-run    削除は行わず、削除候補と理由だけを表示")
+		fmt.Fprintln(w, "  --json       CleanupReport（schema_version、repository、mode、candidates、removed、errors）を出力")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "判定基準:")
+		fmt.Fprintln(w, "  recommended  pull requestがMERGED/CLOSED、worktreeがclean、activeなagentがない")
+		fmt.Fprintln(w, "  review       dirty、pull requestがない/open、GitHubの状態が不明などで自動削除しない")
+		fmt.Fprintln(w, "  keep         main worktree、ロック済み、activeなagentがある")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "最初に gw clean --dry-run を実行して削除候補を確認することを推奨します。")
 	case "json":
 		fmt.Fprintln(w, "# gw JSON output")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "主要コマンドの--json出力にはschema_version、repository、worktrees、sources、errorsが含まれます。取得不能な値はnullまたはunknownで表現されます。")
+		fmt.Fprintln(w, "list、inspect、refreshは次のトップレベル構造で出力します。")
+		fmt.Fprintln(w, "  schema_version, repository, worktrees, sources, errors")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、lockedに加えて次の状態を含みます。")
+		fmt.Fprintln(w, "  git      clean/dirty、upstreamとの差分、最終コミット時刻")
+		fmt.Fprintln(w, "  github   pull requestと取得状態")
+		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
+		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "取得できない値はnullまたはunknownで表現し、推測しません。")
+		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、removed、errorsを含みます（詳細は gw guide clean）。")
 	}
 }
 
