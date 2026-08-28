@@ -89,6 +89,50 @@ func TestRunGuideAgentHook(t *testing.T) {
 	}
 }
 
+func TestRunGuideAgentHookJSONStructure(t *testing.T) {
+	for _, provider := range []string{"claude", "codex"} {
+		var output bytes.Buffer
+		if code := run([]string{"guide", "agent-hook", provider}, &output, &output); code != 0 {
+			t.Fatalf("run returned %d for provider %s", code, provider)
+		}
+
+		block := extractJSONCodeBlock(t, output.String())
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(block), &parsed); err != nil {
+			t.Fatalf("guide output for %s is not valid JSON: %v\n%s", provider, err, block)
+		}
+
+		hooks, ok := parsed["hooks"].(map[string]any)
+		if !ok {
+			t.Fatalf("guide output for %s: expected top-level \"hooks\" object, got %#v", provider, parsed)
+		}
+		for _, event := range []string{"SessionStart", "SessionEnd"} {
+			if _, ok := hooks[event]; !ok {
+				t.Fatalf("guide output for %s: hooks.%s is missing", provider, event)
+			}
+		}
+		for _, event := range []string{"SessionStart", "SessionEnd"} {
+			if _, ok := parsed[event]; ok {
+				t.Fatalf("guide output for %s: %s must be nested under \"hooks\", not top-level", provider, event)
+			}
+		}
+	}
+}
+
+func extractJSONCodeBlock(t *testing.T, output string) string {
+	t.Helper()
+	start := strings.Index(output, "```json\n")
+	if start == -1 {
+		t.Fatalf("no ```json code block found in output:\n%s", output)
+	}
+	start += len("```json\n")
+	end := strings.Index(output[start:], "```")
+	if end == -1 {
+		t.Fatalf("unterminated ```json code block in output:\n%s", output)
+	}
+	return output[start : start+end]
+}
+
 func TestRunAgentEvent(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
