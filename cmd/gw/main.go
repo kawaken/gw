@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 )
 
@@ -226,7 +227,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 			Errors:        result.Errors,
 		})
 	}
-	printInspect(stdout, selected)
+	printInspect(stdout, result.Repository.Path, selected)
 	return 0
 }
 
@@ -287,7 +288,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 			})
 		}
 		for _, wt := range candidates {
-			fmt.Fprintf(stdout, "[recommended] %s\n", wt.Path)
+			fmt.Fprintf(stdout, "[recommended] %s\n", displayPath(result.Repository.Path, wt.Path))
 			for _, reason := range wt.Cleanup.Reasons {
 				fmt.Fprintf(stdout, "  - %s\n", reason)
 			}
@@ -302,13 +303,13 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	cleanupErrors := append([]ResultError{}, result.Errors...)
 	for _, wt := range candidates {
 		if err := gitRun(result.Repository.Path, "worktree", "remove", wt.Path); err != nil {
-			fmt.Fprintf(stderr, "gw clean: cannot remove %s: %v\n", wt.Path, err)
+			fmt.Fprintf(stderr, "gw clean: cannot remove %s: %v\n", displayPath(result.Repository.Path, wt.Path), err)
 			cleanupErrors = append(cleanupErrors, ResultError{Source: "git", Code: "worktree_remove_failed", Message: fmt.Sprintf("%s: %v", wt.Path, err)})
 			continue
 		}
 		removed = append(removed, wt.Path)
 		if !*jsonOutput {
-			fmt.Fprintf(stdout, "removed %s\n", wt.Path)
+			fmt.Fprintf(stdout, "removed %s\n", displayPath(result.Repository.Path, wt.Path))
 		}
 	}
 	if *jsonOutput {
@@ -816,18 +817,20 @@ func printHelp(w io.Writer) {
 }
 
 func printList(w io.Writer, result Result) {
-	fmt.Fprintln(w, "PATH\tBRANCH\tGIT\tAGENT\tCLEANUP")
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "PATH\tBRANCH\tGIT\tAGENT\tCLEANUP")
 	for _, wt := range result.Worktrees {
 		branch := wt.Branch
 		if branch == "" {
 			branch = "(detached)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", wt.Path, branch, gitStatus(wt), agentStatus(wt.Agent), wt.Cleanup.Recommendation)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", displayPath(result.Repository.Path, wt.Path), branch, gitStatus(wt), agentStatus(wt.Agent), wt.Cleanup.Recommendation)
 	}
+	_ = tw.Flush()
 }
 
-func printInspect(w io.Writer, wt Worktree) {
-	fmt.Fprintf(w, "Path: %s\n", wt.Path)
+func printInspect(w io.Writer, repoPath string, wt Worktree) {
+	fmt.Fprintf(w, "Path: %s\n", displayPath(repoPath, wt.Path))
 	fmt.Fprintf(w, "Branch: %s\n", valueOr(wt.Branch, "(detached)"))
 	fmt.Fprintf(w, "HEAD: %s\n", wt.Head)
 	fmt.Fprintf(w, "Git: %s\n", gitStatus(wt))
@@ -977,4 +980,19 @@ func mustAbs(path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(abs)
+}
+
+func displayPath(repoPath, path string) string {
+	if path == "" {
+		return path
+	}
+	absPath := mustAbs(path)
+	if repoPath == "" {
+		return absPath
+	}
+	rel, err := filepath.Rel(mustAbs(repoPath), absPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return absPath
+	}
+	return rel
 }

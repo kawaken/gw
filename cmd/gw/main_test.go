@@ -53,6 +53,45 @@ func TestCleanupFor(t *testing.T) {
 	}
 }
 
+func TestPrintListAlignsColumns(t *testing.T) {
+	result := Result{Repository: Repository{Path: "/tmp/repository"}, Worktrees: []Worktree{
+		{Path: "/tmp/repository", Branch: "main", Git: GitState{Clean: true}, Agent: AgentState{Lifecycle: "ended", Provider: "codex"}, Cleanup: CleanupState{Recommendation: "keep"}},
+		{Path: "/tmp/repository-wt/to-go", Branch: "to-go", Git: GitState{}, Agent: AgentState{Lifecycle: "unknown"}, Cleanup: CleanupState{Recommendation: "review"}},
+		{Path: "/tmp/repository/.claude/worktrees/codex-hooks-json-structure-0a606c", Git: GitState{Clean: true}, Agent: AgentState{Lifecycle: "ended", Provider: "claude"}, Cleanup: CleanupState{Recommendation: "review"}},
+	}}
+
+	var output bytes.Buffer
+	printList(&output, result)
+	want := "PATH                                                 BRANCH      GIT    AGENT         CLEANUP\n" +
+		".                                                    main        clean  codex:ended   keep\n" +
+		"/tmp/repository-wt/to-go                             to-go       dirty  unknown       review\n" +
+		".claude/worktrees/codex-hooks-json-structure-0a606c  (detached)  clean  claude:ended  review\n"
+	if output.String() != want {
+		t.Fatalf("printList output =\n%s, want =\n%s", output.String(), want)
+	}
+}
+
+func TestDisplayPath(t *testing.T) {
+	repoPath := "/tmp/repository"
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "repository root", path: repoPath, want: "."},
+		{name: "inside repository", path: "/tmp/repository/.claude/worktrees/fix", want: ".claude/worktrees/fix"},
+		{name: "outside repository", path: "/tmp/repository-wt/fix", want: "/tmp/repository-wt/fix"},
+		{name: "shared prefix outside repository", path: "/tmp/repository-other/fix", want: "/tmp/repository-other/fix"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := displayPath(repoPath, tt.path); got != tt.want {
+				t.Fatalf("displayPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSessionStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	want := sessionStore{Version: 1, Sessions: []sessionRecord{{
