@@ -20,7 +20,7 @@ const schemaVersion = 1
 
 const (
 	githubCacheVersion = 1
-	githubCacheTTL     = time.Minute
+	githubCacheTTL     = 30 * time.Minute
 )
 
 type Result struct {
@@ -1023,7 +1023,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw list")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "現在のリポジトリに紐づくGit worktreeを一覧表示します。列はPATH、BRANCH、GIT（clean/dirty）、AGENT、CLEANUP（recommended/review/keep）です。")
-		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。GitHub PR情報は直近60秒以内のキャッシュを再利用します。")
+		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    schema_version、repository、worktrees、sources、errorsを含む構造化出力（詳細は gw guide json）")
@@ -1033,7 +1033,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw inspect [<worktree>]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "指定したworktreeのGit、GitHub、agent、cleanup判定と判定理由を表示します。引数を省略するとmain worktreeを対象にします。")
-		fmt.Fprintln(w, "GitHub PR情報は直近60秒以内のキャッシュを再利用します。")
+		fmt.Fprintln(w, "GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    対象worktree1件を含む gw list --json と同じResult構造で出力")
