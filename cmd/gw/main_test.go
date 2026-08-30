@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseWorktreeList(t *testing.T) {
@@ -218,5 +219,132 @@ func TestReadSessionStoreMissing(t *testing.T) {
 	_, err := readSessionStore(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGitHubCacheRoundTrip(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	want := newGitHubCache(repoPath)
+	want.Entries["feature/cache"] = githubCacheEntry{
+		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 42, State: "OPEN"}},
+		FetchedAt: time.Now().UTC(),
+	}
+	if err := writeGitHubCache(repoPath, want); err != nil {
+		t.Fatalf("writeGitHubCache returned error: %v", err)
+	}
+
+	got, err := readGitHubCache(repoPath)
+	if err != nil {
+		t.Fatalf("readGitHubCache returned error: %v", err)
+	}
+	if got.Repository != mustAbs(repoPath) || got.Entries["feature/cache"].State.PR.Number != 42 {
+		t.Fatalf("cache = %+v", got)
+	}
+	path, err := githubCachePath(repoPath)
+	if err != nil {
+		t.Fatalf("githubCachePath returned error: %v", err)
+	}
+	if mode := fileMode(t, path); mode.Perm() != 0o600 {
+		t.Fatalf("GitHub cache mode = %o, want 600", mode.Perm())
+	}
+}
+
+func TestCollectGitHubStatesUsesCacheAndRefreshes(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	records := []worktreeRecord{{Path: repoPath, Branch: "feature/cache"}}
+
+	originalLookPath := lookPath
+	originalFetcher := githubPRFetcher
+	t.Cleanup(func() {
+		lookPath = originalLookPath
+		githubPRFetcher = originalFetcher
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/gh", nil }
+	calls := 0
+	githubPRFetcher = func(string, string) (GitHubState, error) {
+		calls++
+		return GitHubState{Status: "available", PR: &PullRequest{Number: calls, State: "OPEN"}}, nil
+	}
+
+	states, source, err := collectGitHubStates(repoPath, records, false)
+	if err != nil || source != "gh" || calls != 1 || states["feature/cache"].PR.Number != 1 {
+		t.Fatalf("initial fetch: states=%+v source=%q calls=%d err=%v", states, source, calls, err)
+	}
+	states, source, err = collectGitHubStates(repoPath, records, false)
+	if err != nil || source != "cache" || calls != 1 || states["feature/cache"].PR.Number != 1 {
+		t.Fatalf("cached fetch: states=%+v source=%q calls=%d err=%v", states, source, calls, err)
+	}
+	states, source, err = collectGitHubStates(repoPath, records, true)
+	if err != nil || source != "gh" || calls != 2 || states["feature/cache"].PR.Number != 2 {
+		t.Fatalf("forced refresh: states=%+v source=%q calls=%d err=%v", states, source, calls, err)
+	}
+}
+
+func TestCollectGitHubStatesRefreshesExpiredCache(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	cache := newGitHubCache(repoPath)
+	cache.Entries["feature/expired"] = githubCacheEntry{
+		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 1, State: "MERGED"}},
+		FetchedAt: time.Now().UTC().Add(-githubCacheTTL - time.Second),
+	}
+	if err := writeGitHubCache(repoPath, cache); err != nil {
+		t.Fatalf("writeGitHubCache returned error: %v", err)
+	}
+
+	originalLookPath := lookPath
+	originalFetcher := githubPRFetcher
+	t.Cleanup(func() {
+		lookPath = originalLookPath
+		githubPRFetcher = originalFetcher
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/gh", nil }
+	calls := 0
+	githubPRFetcher = func(string, string) (GitHubState, error) {
+		calls++
+		return GitHubState{Status: "available", PR: &PullRequest{Number: 2, State: "OPEN"}}, nil
+	}
+
+	states, source, err := collectGitHubStates(repoPath, []worktreeRecord{{Branch: "feature/expired"}}, false)
+	if err != nil || source != "gh" || calls != 1 || states["feature/expired"].PR.Number != 2 {
+		t.Fatalf("expired fetch: states=%+v source=%q calls=%d err=%v", states, source, calls, err)
+	}
+}
+
+func TestCollectGitHubStatesDoesNotOverwriteOnFetchFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	cache := newGitHubCache(repoPath)
+	cache.Entries["feature/failure"] = githubCacheEntry{
+		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 7, State: "MERGED"}},
+		FetchedAt: time.Now().UTC(),
+	}
+	if err := writeGitHubCache(repoPath, cache); err != nil {
+		t.Fatalf("writeGitHubCache returned error: %v", err)
+	}
+
+	originalLookPath := lookPath
+	originalFetcher := githubPRFetcher
+	t.Cleanup(func() {
+		lookPath = originalLookPath
+		githubPRFetcher = originalFetcher
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/gh", nil }
+	githubPRFetcher = func(string, string) (GitHubState, error) {
+		return GitHubState{}, errors.New("network unavailable")
+	}
+
+	states, source, err := collectGitHubStates(repoPath, []worktreeRecord{{Branch: "feature/failure"}}, true)
+	if err == nil || source != "unknown" || states["feature/failure"].Status != "unknown" {
+		t.Fatalf("failed fetch: states=%+v source=%q err=%v", states, source, err)
+	}
+	got, err := readGitHubCache(repoPath)
+	if err != nil {
+		t.Fatalf("readGitHubCache returned error: %v", err)
+	}
+	if got.Entries["feature/failure"].State.PR.Number != 7 {
+		t.Fatalf("cache was overwritten after failed fetch: %+v", got.Entries["feature/failure"])
 	}
 }

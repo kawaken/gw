@@ -36,7 +36,7 @@ gw refresh [--json]
 
 `list` は worktree の状態を一覧表示し、`inspect` は指定した worktree の詳細と cleanup 判定理由を表示します。`inspect` の引数を省略するとメイン worktree を対象にします。
 
-`refresh` は Git と利用可能な連携先から現在の状態を再取得します。結果を永続化する更新処理ではありません。
+`refresh` は Git と利用可能な連携先から現在の状態を再取得し、GitHub PR 情報のキャッシュを更新します。
 
 ### cleanup
 
@@ -89,7 +89,7 @@ worktree には `path`、`branch`、`head`、`detached`、`locked` と、次の�
 
 GitHub の情報取得には `gh` CLI を使用します。ブランチをもとに pull request を検索し、番号、タイトル、状態、URL、merge 時刻などを取得します。
 
-`gh` がない、認証できない、通信に失敗したなどの場合は、GitHub の状態を `unknown` または `unavailable` として扱います。GitHub の結果はキャッシュせず、各状態取得時に再取得します。
+`gh` がない、認証できない、通信に失敗したなどの場合は、GitHub の状態を `unknown` または `unavailable` として扱います。`list` と `inspect` は 60 秒以内のキャッシュを利用し、`refresh` と `clean` はキャッシュを無視して再取得します。期限切れのキャッシュは cleanup 判定に使いません。取得に成功した結果だけを XDG state directory 配下の `gw/cache/github/` に保存します。
 
 ## 6. エージェントセッション
 
@@ -119,13 +119,15 @@ dirty な worktree、pull request がないもの、open の pull request、GitH
 
 ## 8. 状態保存
 
-エージェントセッションの状態だけを XDG Base Directory に保存します。
+エージェントセッションの状態と GitHub PR の短期キャッシュを XDG Base Directory に保存します。
 
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/gw/sessions.json
+
+${XDG_STATE_HOME:-~/.local/state}/gw/cache/github/
 ```
 
-設定ファイル、GitHub キャッシュ、観測結果の永続保存は現在使用していません。
+設定ファイルや観測結果全体の永続保存は現在使用していません。GitHub PR 情報だけは短期キャッシュとして保存します。
 
 ## 9. 実装状況
 
@@ -143,8 +145,8 @@ ${XDG_STATE_HOME:-~/.local/state}/gw/sessions.json
 
 - JSON の全フィールドと列挙値を、外部向けの正式な仕様として固定するか
 - リポジトリごとの設定や ignore が必要か。その場合の設定ファイル形式
-- GitHub の問い合わせが増えた場合のキャッシュと有効期限
+- GitHub キャッシュの TTL を設定可能にするか
 - cleanup の一部失敗時に終了コードを非ゼロにするか
 - マージ済みブランチを削除する明示的なオプションが必要か
 
-現在の実装は、設定やキャッシュを持たず、取得時に GitHub を再照会する単純な構成です。
+GitHub PR 情報は短期キャッシュを利用し、`refresh` と `clean` では強制的に再取得します。

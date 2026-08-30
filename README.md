@@ -58,7 +58,7 @@ $ gw guide agent-hook codex
 
 表示された設定を、利用しているエージェントの hook 設定に追加してください。`gw` は既存の設定を変更しません。
 
-GitHub の pull request 情報は `gh` コマンドが利用できる場合に取得します。取得できない情報は推測せず、`unknown` として扱います。
+GitHub の pull request 情報は `gh` コマンドが利用できる場合に取得します。通常の `list` と `inspect` は、直近 60 秒以内に取得した PR 情報をキャッシュから再利用します。`refresh` と `clean` はキャッシュを使わず、現在の情報を再取得します。取得できない情報は推測せず、`unknown` として扱います。
 
 ## 状態の保存場所
 
@@ -67,3 +67,5 @@ GitHub の pull request 情報は `gh` コマンドが利用できる場合に�
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/gw/sessions.json
 ```
+
+GitHub PR 情報のキャッシュは、同じ状態ディレクトリ配下の `cache/github/` にリポジトリごとに保存されます。キャッシュが期限切れまたは壊れている場合は再取得し、再取得できない場合は cleanup 対象にしません。
