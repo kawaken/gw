@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,11 @@ import (
 )
 
 const schemaVersion = 1
+
+const (
+	githubCacheVersion = 1
+	githubCacheTTL     = 30 * time.Minute
+)
 
 type Result struct {
 	SchemaVersion int           `json:"schema_version"`
@@ -130,6 +136,17 @@ type sessionRecord struct {
 	ObservedAt     string `json:"observed_at"`
 }
 
+type githubCache struct {
+	Version    int                         `json:"version"`
+	Repository string                      `json:"repository"`
+	Entries    map[string]githubCacheEntry `json:"entries"`
+}
+
+type githubCacheEntry struct {
+	State     GitHubState `json:"state"`
+	FetchedAt time.Time   `json:"fetched_at"`
+}
+
 type hookEvent struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -183,7 +200,7 @@ func runList(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	result, err := collectResult()
+	result, err := collectResult(false)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
@@ -206,7 +223,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	result, err := collectResult()
+	result, err := collectResult(false)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
@@ -243,7 +260,7 @@ func runRefresh(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	result, err := collectResult()
+	result, err := collectResult(true)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
@@ -267,7 +284,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	result, err := collectResult()
+	result, err := collectResult(true)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
@@ -419,7 +436,7 @@ func runAgentEvent(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	return 0
 }
 
-func collectResult() (Result, error) {
+func collectResult(forceGitHubRefresh bool) (Result, error) {
 	repoPath, err := gitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
 		return Result{}, fmt.Errorf("not inside a Git repository: %w", err)
@@ -439,11 +456,9 @@ func collectResult() (Result, error) {
 		Repository:    Repository{Path: repoPath, Branch: branch},
 		Sources:       Sources{GitHub: "unavailable", Agent: "unavailable"},
 	}
-	githubStates, githubErr := collectGitHubStates(repoPath, records)
-	if githubErr == nil {
-		result.Sources.GitHub = "gh"
-	} else if !errors.Is(githubErr, errGitHubUnavailable) {
-		result.Sources.GitHub = "unknown"
+	githubStates, githubSource, githubErr := collectGitHubStates(repoPath, records, forceGitHubRefresh)
+	result.Sources.GitHub = githubSource
+	if githubErr != nil && !errors.Is(githubErr, errGitHubUnavailable) {
 		result.Errors = append(result.Errors, ResultError{Source: "github", Code: "unavailable", Message: githubErr.Error()})
 	}
 	if sessionErr == nil {
@@ -476,15 +491,26 @@ func collectResult() (Result, error) {
 
 var errGitHubUnavailable = errors.New("gh is not available")
 
-func collectGitHubStates(repoPath string, records []worktreeRecord) (map[string]GitHubState, error) {
+var (
+	lookPath        = exec.LookPath
+	githubPRFetcher = githubPRForBranch
+)
+
+func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh bool) (map[string]GitHubState, string, error) {
 	states := make(map[string]GitHubState)
-	if _, err := exec.LookPath("gh"); err != nil {
-		for _, record := range records {
-			states[record.Branch] = GitHubState{Status: "unavailable"}
-		}
-		return states, errGitHubUnavailable
+	cache, cacheErr := readGitHubCache(repoPath)
+	if cacheErr != nil && !errors.Is(cacheErr, os.ErrNotExist) {
+		cache = newGitHubCache(repoPath)
+	}
+	ghAvailable := false
+	if _, err := lookPath("gh"); err == nil {
+		ghAvailable = true
 	}
 	var firstErr error
+	usedCache := false
+	usedGH := false
+	cacheUpdated := false
+	now := time.Now().UTC()
 	for _, record := range records {
 		if record.Branch == "" {
 			states[record.Branch] = GitHubState{Status: "unknown"}
@@ -493,7 +519,18 @@ func collectGitHubStates(repoPath string, records []worktreeRecord) (map[string]
 		if _, ok := states[record.Branch]; ok {
 			continue
 		}
-		state, err := githubPRForBranch(repoPath, record.Branch)
+		if !forceRefresh {
+			if entry, ok := cache.Entries[record.Branch]; ok && now.Sub(entry.FetchedAt) >= 0 && now.Sub(entry.FetchedAt) < githubCacheTTL {
+				states[record.Branch] = entry.State
+				usedCache = true
+				continue
+			}
+		}
+		if !ghAvailable {
+			states[record.Branch] = GitHubState{Status: "unavailable"}
+			continue
+		}
+		state, err := githubPRFetcher(repoPath, record.Branch)
 		if err != nil {
 			states[record.Branch] = GitHubState{Status: "unknown"}
 			if firstErr == nil {
@@ -502,8 +539,34 @@ func collectGitHubStates(repoPath string, records []worktreeRecord) (map[string]
 			continue
 		}
 		states[record.Branch] = state
+		usedGH = true
+		cache.Entries[record.Branch] = githubCacheEntry{State: state, FetchedAt: now}
+		cacheUpdated = true
 	}
-	return states, firstErr
+	if cacheUpdated {
+		if err := writeGitHubCache(repoPath, cache); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	source := "unknown"
+	switch {
+	case usedGH:
+		source = "gh"
+	case usedCache:
+		source = "cache"
+	case !ghAvailable:
+		source = "unavailable"
+	}
+	if firstErr != nil && !usedGH && !usedCache && ghAvailable {
+		source = "unknown"
+	}
+	if firstErr != nil && errors.Is(firstErr, errGitHubUnavailable) {
+		source = "unavailable"
+	}
+	if !ghAvailable && !usedCache {
+		return states, source, errGitHubUnavailable
+	}
+	return states, source, firstErr
 }
 
 func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
@@ -758,6 +821,93 @@ func statePath(name string) (string, error) {
 	return filepath.Join(base, "gw", name), nil
 }
 
+func newGitHubCache(repoPath string) githubCache {
+	return githubCache{
+		Version:    githubCacheVersion,
+		Repository: mustAbs(repoPath),
+		Entries:    make(map[string]githubCacheEntry),
+	}
+}
+
+func githubCachePath(repoPath string) (string, error) {
+	repoPath = mustAbs(repoPath)
+	digest := sha256.Sum256([]byte(repoPath))
+	name := fmt.Sprintf("%x.json", digest)
+	return statePath(filepath.Join("cache", "github", name))
+}
+
+func readGitHubCache(repoPath string) (githubCache, error) {
+	path, err := githubCachePath(repoPath)
+	if err != nil {
+		return githubCache{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return newGitHubCache(repoPath), os.ErrNotExist
+		}
+		return githubCache{}, fmt.Errorf("read GitHub cache: %w", err)
+	}
+	var cache githubCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return githubCache{}, fmt.Errorf("parse GitHub cache: %w", err)
+	}
+	if cache.Repository != "" && mustAbs(cache.Repository) != mustAbs(repoPath) {
+		return githubCache{}, errors.New("GitHub cache repository does not match current repository")
+	}
+	if cache.Version == 0 {
+		cache.Version = githubCacheVersion
+	}
+	if cache.Entries == nil {
+		cache.Entries = make(map[string]githubCacheEntry)
+	}
+	cache.Repository = mustAbs(repoPath)
+	return cache, nil
+}
+
+func writeGitHubCache(repoPath string, cache githubCache) error {
+	path, err := githubCachePath(repoPath)
+	if err != nil {
+		return err
+	}
+	if cache.Version == 0 {
+		cache.Version = githubCacheVersion
+	}
+	cache.Repository = mustAbs(repoPath)
+	if cache.Entries == nil {
+		cache.Entries = make(map[string]githubCacheEntry)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create GitHub cache directory: %w", err)
+	}
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode GitHub cache: %w", err)
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".github-cache-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create GitHub cache temporary file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set GitHub cache permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write GitHub cache: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close GitHub cache: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace GitHub cache: %w", err)
+	}
+	return nil
+}
+
 func gitOutput(args ...string) (string, error) {
 	return gitOutputFrom("", args...)
 }
@@ -873,7 +1023,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw list")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "現在のリポジトリに紐づくGit worktreeを一覧表示します。列はPATH、BRANCH、GIT（clean/dirty）、AGENT、CLEANUP（recommended/review/keep）です。")
-		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。")
+		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    schema_version、repository、worktrees、sources、errorsを含む構造化出力（詳細は gw guide json）")
@@ -883,13 +1033,14 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw inspect [<worktree>]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "指定したworktreeのGit、GitHub、agent、cleanup判定と判定理由を表示します。引数を省略するとmain worktreeを対象にします。")
+		fmt.Fprintln(w, "GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    対象worktree1件を含む gw list --json と同じResult構造で出力")
 	case "refresh":
 		fmt.Fprintln(w, "# gw refresh")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Gitと、利用可能なGitHub/agentの連携先から現在の状態を再取得して表示します。何かを永続化する更新処理ではありません。")
+		fmt.Fprintln(w, "Gitと、利用可能なGitHub/agentの連携先から現在の状態を再取得して表示し、GitHub PR情報のキャッシュも更新します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
@@ -901,6 +1052,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --dry-run    削除は行わず、削除候補と理由だけを表示")
 		fmt.Fprintln(w, "  --json       CleanupReport（schema_version、repository、mode、candidates、removed、errors）を出力")
+		fmt.Fprintln(w, "GitHub PR情報は常に再取得してからcleanup判定を行います。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "判定基準:")
 		fmt.Fprintln(w, "  recommended  pull requestがMERGED/CLOSED、worktreeがclean、activeなagentがない")
@@ -920,6 +1072,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
 		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
 		fmt.Fprintln(w)
+		fmt.Fprintln(w, "sources.githubはGitHub PR情報の取得元（gh、cache、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "取得できない値はnullまたはunknownで表現し、推測しません。")
 		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、removed、errorsを含みます（詳細は gw guide clean）。")
 	}
