@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,6 +204,68 @@ func TestJSONResultShape(t *testing.T) {
 	}
 	if decoded["schema_version"] != float64(schemaVersion) {
 		t.Fatalf("schema_version = %v", decoded["schema_version"])
+	}
+}
+
+func TestRemoveWorktreeForceRemovesIgnoredFiles(t *testing.T) {
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+	gitTestCommand(t, repoPath, "config", "user.email", "test@example.com")
+	gitTestCommand(t, repoPath, "config", "user.name", "Test User")
+	gitTestCommand(t, repoPath, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repoPath, ".gitignore"), []byte(".ignored/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "add", ".gitignore")
+	gitTestCommand(t, repoPath, "commit", "--quiet", "-m", "initial")
+
+	worktreePath := filepath.Join(t.TempDir(), "worktree")
+	gitTestCommand(t, repoPath, "worktree", "add", "--quiet", "-b", "feature", worktreePath)
+	ignoredPath := filepath.Join(worktreePath, ".ignored", "build.bin")
+	if err := os.MkdirAll(filepath.Dir(ignoredPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ignoredPath, []byte("build artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeWorktree(repoPath, worktreePath); err != nil {
+		t.Fatalf("removeWorktree returned error: %v", err)
+	}
+	if _, err := os.Lstat(worktreePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree path still exists, err = %v", err)
+	}
+	records, err := gitWorktrees(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Path == worktreePath {
+			t.Fatalf("worktree registration still exists for %s", worktreePath)
+		}
+	}
+}
+
+func TestGitRunIncludesGitError(t *testing.T) {
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+
+	err := gitRun(repoPath, "rev-parse", "--verify", "missing-ref")
+	if err == nil {
+		t.Fatal("gitRun returned nil for a missing ref")
+	}
+	if !strings.Contains(err.Error(), "fatal:") {
+		t.Fatalf("gitRun error = %q, want Git stderr", err)
+	}
+}
+
+func gitTestCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	gitArgs := append([]string{"-c", "core.fsmonitor=false"}, args...)
+	cmd := exec.Command("git", gitArgs...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(gitArgs, " "), err, output)
 	}
 }
 

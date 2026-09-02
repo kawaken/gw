@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -319,7 +320,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 	removed := make([]string, 0, len(candidates))
 	cleanupErrors := append([]ResultError{}, result.Errors...)
 	for _, wt := range candidates {
-		if err := gitRun(result.Repository.Path, "worktree", "remove", wt.Path); err != nil {
+		if err := removeWorktree(result.Repository.Path, wt.Path); err != nil {
 			fmt.Fprintf(stderr, "gw clean: cannot remove %s: %v\n", displayPath(result.Repository.Path, wt.Path), err)
 			cleanupErrors = append(cleanupErrors, ResultError{Source: "git", Code: "worktree_remove_failed", Message: fmt.Sprintf("%s: %v", wt.Path, err)})
 			continue
@@ -330,7 +331,7 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if *jsonOutput {
-		return writeJSON(stdout, CleanupReport{
+		code := writeJSON(stdout, CleanupReport{
 			SchemaVersion: schemaVersion,
 			Repository:    result.Repository,
 			Mode:          "apply",
@@ -338,9 +339,19 @@ func runClean(args []string, stdout, stderr io.Writer) int {
 			Removed:       removed,
 			Errors:        cleanupErrors,
 		})
+		if code != 0 {
+			return code
+		}
+		if len(cleanupErrors) > 0 {
+			return 1
+		}
+		return 0
 	}
-	if len(removed) == 0 {
+	if len(removed) == 0 && len(candidates) == 0 {
 		fmt.Fprintln(stdout, "No recommended worktrees to remove.")
+	}
+	if len(cleanupErrors) > 0 {
+		return 1
 	}
 	return 0
 }
@@ -934,8 +945,60 @@ func gitRun(dir string, args ...string) error {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			return errors.New(message)
+		}
+		return err
+	}
+	return nil
+}
+
+func removeWorktree(repoPath, worktreePath string) error {
+	removeErr := gitRun(repoPath, "worktree", "remove", "--force", worktreePath)
+	verifyErr := verifyWorktreeRemoved(repoPath, worktreePath)
+	if removeErr != nil {
+		if verifyErr != nil {
+			return fmt.Errorf("%v; %w", removeErr, verifyErr)
+		}
+		return removeErr
+	}
+	return verifyErr
+}
+
+func verifyWorktreeRemoved(repoPath, worktreePath string) error {
+	records, err := gitWorktrees(repoPath)
+	if err != nil {
+		return fmt.Errorf("verify worktree registration removal: %w", err)
+	}
+	worktreePath = mustAbs(worktreePath)
+	registered := false
+	for _, record := range records {
+		if record.Path == worktreePath {
+			registered = true
+			break
+		}
+	}
+
+	_, pathErr := os.Lstat(worktreePath)
+	pathExists := pathErr == nil
+	if pathErr != nil && !errors.Is(pathErr, os.ErrNotExist) {
+		return fmt.Errorf("verify worktree path removal: %w", pathErr)
+	}
+	if !registered && !pathExists {
+		return nil
+	}
+
+	remaining := make([]string, 0, 2)
+	if registered {
+		remaining = append(remaining, "Git worktree registration remains")
+	}
+	if pathExists {
+		remaining = append(remaining, "worktree path remains")
+	}
+	return errors.New(strings.Join(remaining, "; "))
 }
 
 func writeJSON(w io.Writer, value any) int {
@@ -1047,7 +1110,7 @@ func printGuideTopic(w io.Writer, topic string) {
 	case "clean":
 		fmt.Fprintln(w, "# gw clean")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "cleanup判定がrecommendedのworktreeにgit worktree removeを実行します。dirty、現在のworktree、activeなagent sessionは削除しません。ブランチは削除しません。")
+		fmt.Fprintln(w, "cleanup判定がrecommendedのworktreeにgit worktree remove --forceを実行します。ignoredなビルド生成物も削除対象です。dirty、現在のworktree、activeなagent sessionは削除しません。ブランチは削除しません。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --dry-run    削除は行わず、削除候補と理由だけを表示")
@@ -1060,6 +1123,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "  keep         main worktree、ロック済み、activeなagentがある")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "最初に gw clean --dry-run を実行して削除候補を確認することを推奨します。")
+		fmt.Fprintln(w, "削除に失敗した場合はGitの具体的なエラー理由を表示し、終了コード1を返します。")
 	case "json":
 		fmt.Fprintln(w, "# gw JSON output")
 		fmt.Fprintln(w)
