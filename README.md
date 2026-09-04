@@ -60,7 +60,11 @@ $ gw guide agent-hook codex
 
 表示された設定を、利用しているエージェントの hook 設定に追加してください。`gw` は既存の設定を変更しません。
 
-GitHub の pull request 情報は `gh` コマンドが利用できる場合に取得します。通常の `list` と `inspect` は、直近 30 分以内に取得した PR 情報をキャッシュから再利用します。`refresh` と `clean` はキャッシュを使わず、現在の情報を再取得します。取得できない情報は推測せず、`unknown` として扱います。
+GitHub の pull request 情報は `gh` コマンドが利用できる場合に取得します。通常の `list` と `inspect` は、直近 30 分以内に取得した PR 情報をキャッシュから再利用します。`refresh` と `clean` はキャッシュを使わず、現在の情報を再取得します。
+
+JSON の `worktrees[].github.status` は、worktreeごとのPR検索結果を表します。`found` はPRあり、`not_found` は問い合わせ成功・PRなし、`unknown` はブランチがなく確認できない状態、`unavailable` はGitHub連携が利用できないか取得に失敗した状態です。取得元（`gh`、`cache`など）はトップレベルの `sources.github` に分離して記録されます。取得に失敗した場合は `errors` にも詳細を記録します。
+
+この意味変更に伴い、JSONの `schema_version` は `2` です。以前のキャッシュにある`available`は、PRの有無に応じて`found`または`not_found`へ読み替えます。
 
 ## 状態の保存場所
 
