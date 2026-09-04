@@ -49,7 +49,7 @@ func TestCleanupFor(t *testing.T) {
 		t.Fatalf("active agent recommendation = %q, want keep", got.Recommendation)
 	}
 	base.Agent.Lifecycle = "ended"
-	base.GitHub = GitHubState{Status: "available", PR: &PullRequest{State: "MERGED"}}
+	base.GitHub = GitHubState{Status: githubStatusFound, PR: &PullRequest{State: "MERGED"}}
 	if got := cleanupFor(base, false); got.Recommendation != "recommended" {
 		t.Fatalf("merged PR recommendation = %q, want recommended", got.Recommendation)
 	}
@@ -290,7 +290,7 @@ func TestGitHubCacheRoundTrip(t *testing.T) {
 	repoPath := t.TempDir()
 	want := newGitHubCache(repoPath)
 	want.Entries["feature/cache"] = githubCacheEntry{
-		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 42, State: "OPEN"}},
+		State:     GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: 42, State: "OPEN"}},
 		FetchedAt: time.Now().UTC(),
 	}
 	if err := writeGitHubCache(repoPath, want); err != nil {
@@ -328,7 +328,7 @@ func TestCollectGitHubStatesUsesCacheAndRefreshes(t *testing.T) {
 	calls := 0
 	githubPRFetcher = func(string, string) (GitHubState, error) {
 		calls++
-		return GitHubState{Status: "available", PR: &PullRequest{Number: calls, State: "OPEN"}}, nil
+		return GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: calls, State: "OPEN"}}, nil
 	}
 
 	states, source, err := collectGitHubStates(repoPath, records, false)
@@ -345,12 +345,45 @@ func TestCollectGitHubStatesUsesCacheAndRefreshes(t *testing.T) {
 	}
 }
 
+func TestCollectGitHubStatesReportsNotFoundAndUnknown(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+
+	originalLookPath := lookPath
+	originalFetcher := githubPRFetcher
+	t.Cleanup(func() {
+		lookPath = originalLookPath
+		githubPRFetcher = originalFetcher
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/gh", nil }
+	githubPRFetcher = func(string, string) (GitHubState, error) {
+		return GitHubState{Status: githubStatusNotFound}, nil
+	}
+
+	states, source, err := collectGitHubStates(repoPath, []worktreeRecord{
+		{Branch: "feature/no-pr"},
+		{Detached: true},
+	}, false)
+	if err != nil {
+		t.Fatalf("collectGitHubStates returned error: %v", err)
+	}
+	if source != "gh" {
+		t.Fatalf("source = %q, want gh", source)
+	}
+	if states["feature/no-pr"].Status != githubStatusNotFound {
+		t.Fatalf("not-found status = %q, want %q", states["feature/no-pr"].Status, githubStatusNotFound)
+	}
+	if states[""].Status != githubStatusUnknown {
+		t.Fatalf("detached status = %q, want %q", states[""].Status, githubStatusUnknown)
+	}
+}
+
 func TestCollectGitHubStatesRefreshesExpiredCache(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoPath := t.TempDir()
 	cache := newGitHubCache(repoPath)
 	cache.Entries["feature/expired"] = githubCacheEntry{
-		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 1, State: "MERGED"}},
+		State:     GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: 1, State: "MERGED"}},
 		FetchedAt: time.Now().UTC().Add(-githubCacheTTL - time.Second),
 	}
 	if err := writeGitHubCache(repoPath, cache); err != nil {
@@ -367,7 +400,7 @@ func TestCollectGitHubStatesRefreshesExpiredCache(t *testing.T) {
 	calls := 0
 	githubPRFetcher = func(string, string) (GitHubState, error) {
 		calls++
-		return GitHubState{Status: "available", PR: &PullRequest{Number: 2, State: "OPEN"}}, nil
+		return GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: 2, State: "OPEN"}}, nil
 	}
 
 	states, source, err := collectGitHubStates(repoPath, []worktreeRecord{{Branch: "feature/expired"}}, false)
@@ -381,7 +414,7 @@ func TestCollectGitHubStatesDoesNotOverwriteOnFetchFailure(t *testing.T) {
 	repoPath := t.TempDir()
 	cache := newGitHubCache(repoPath)
 	cache.Entries["feature/failure"] = githubCacheEntry{
-		State:     GitHubState{Status: "available", PR: &PullRequest{Number: 7, State: "MERGED"}},
+		State:     GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: 7, State: "MERGED"}},
 		FetchedAt: time.Now().UTC(),
 	}
 	if err := writeGitHubCache(repoPath, cache); err != nil {
@@ -400,7 +433,7 @@ func TestCollectGitHubStatesDoesNotOverwriteOnFetchFailure(t *testing.T) {
 	}
 
 	states, source, err := collectGitHubStates(repoPath, []worktreeRecord{{Branch: "feature/failure"}}, true)
-	if err == nil || source != "unknown" || states["feature/failure"].Status != "unknown" {
+	if err == nil || source != "unknown" || states["feature/failure"].Status != githubStatusUnavailable {
 		t.Fatalf("failed fetch: states=%+v source=%q err=%v", states, source, err)
 	}
 	got, err := readGitHubCache(repoPath)
@@ -409,5 +442,74 @@ func TestCollectGitHubStatesDoesNotOverwriteOnFetchFailure(t *testing.T) {
 	}
 	if got.Entries["feature/failure"].State.PR.Number != 7 {
 		t.Fatalf("cache was overwritten after failed fetch: %+v", got.Entries["feature/failure"])
+	}
+}
+
+func TestNormalizeGitHubStateMigratesLegacyStatus(t *testing.T) {
+	withoutPR := normalizeGitHubState(GitHubState{Status: "available"})
+	if withoutPR.Status != githubStatusNotFound {
+		t.Fatalf("status without PR = %q, want %q", withoutPR.Status, githubStatusNotFound)
+	}
+
+	withPR := normalizeGitHubState(GitHubState{
+		Status: "available",
+		PR:     &PullRequest{Number: 42},
+	})
+	if withPR.Status != githubStatusFound {
+		t.Fatalf("status with PR = %q, want %q", withPR.Status, githubStatusFound)
+	}
+}
+
+func TestGitHubCacheMigratesLegacyVersion(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	want := githubCache{
+		Version:    1,
+		Repository: repoPath,
+		Entries: map[string]githubCacheEntry{
+			"feature/no-pr": {State: GitHubState{Status: "available"}, FetchedAt: time.Now().UTC()},
+		},
+	}
+	if err := writeGitHubCache(repoPath, want); err != nil {
+		t.Fatalf("writeGitHubCache returned error: %v", err)
+	}
+
+	got, err := readGitHubCache(repoPath)
+	if err != nil {
+		t.Fatalf("readGitHubCache returned error: %v", err)
+	}
+	if got.Version != githubCacheVersion {
+		t.Fatalf("cache version = %d, want %d", got.Version, githubCacheVersion)
+	}
+	if got.Entries["feature/no-pr"].State.Status != githubStatusNotFound {
+		t.Fatalf("migrated status = %q, want %q", got.Entries["feature/no-pr"].State.Status, githubStatusNotFound)
+	}
+}
+
+func TestCleanupForGitHubStatuses(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		recommend string
+		reason    string
+	}{
+		{name: "unknown", status: githubStatusUnknown, recommend: "review", reason: "github_state_unknown"},
+		{name: "unavailable", status: githubStatusUnavailable, recommend: "review", reason: "github_state_unavailable"},
+		{name: "not found", status: githubStatusNotFound, recommend: "review", reason: "no_pull_request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cleanupFor(Worktree{
+				Git:    GitState{Clean: true},
+				Agent:  AgentState{Lifecycle: "ended"},
+				GitHub: GitHubState{Status: tt.status},
+			}, false)
+			if got.Recommendation != tt.recommend {
+				t.Fatalf("recommendation = %q, want %q", got.Recommendation, tt.recommend)
+			}
+			if len(got.Reasons) != 1 || got.Reasons[0] != tt.reason {
+				t.Fatalf("reasons = %v, want [%q]", got.Reasons, tt.reason)
+			}
+		})
 	}
 }

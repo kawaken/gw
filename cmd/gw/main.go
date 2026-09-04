@@ -17,11 +17,18 @@ import (
 	"time"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const (
-	githubCacheVersion = 1
+	githubCacheVersion = 2
 	githubCacheTTL     = 30 * time.Minute
+)
+
+const (
+	githubStatusFound       = "found"
+	githubStatusNotFound    = "not_found"
+	githubStatusUnknown     = "unknown"
+	githubStatusUnavailable = "unavailable"
 )
 
 type Result struct {
@@ -58,8 +65,10 @@ type GitState struct {
 }
 
 type GitHubState struct {
-	PR     *PullRequest `json:"pr"`
-	Status string       `json:"status"`
+	PR *PullRequest `json:"pr"`
+	// Status describes the PR lookup result for this worktree. The source of
+	// that result is reported separately in Result.Sources.GitHub.
+	Status string `json:"status"`
 }
 
 type PullRequest struct {
@@ -524,7 +533,7 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 	now := time.Now().UTC()
 	for _, record := range records {
 		if record.Branch == "" {
-			states[record.Branch] = GitHubState{Status: "unknown"}
+			states[record.Branch] = GitHubState{Status: githubStatusUnknown}
 			continue
 		}
 		if _, ok := states[record.Branch]; ok {
@@ -532,23 +541,24 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 		}
 		if !forceRefresh {
 			if entry, ok := cache.Entries[record.Branch]; ok && now.Sub(entry.FetchedAt) >= 0 && now.Sub(entry.FetchedAt) < githubCacheTTL {
-				states[record.Branch] = entry.State
+				states[record.Branch] = normalizeGitHubState(entry.State)
 				usedCache = true
 				continue
 			}
 		}
 		if !ghAvailable {
-			states[record.Branch] = GitHubState{Status: "unavailable"}
+			states[record.Branch] = GitHubState{Status: githubStatusUnavailable}
 			continue
 		}
 		state, err := githubPRFetcher(repoPath, record.Branch)
 		if err != nil {
-			states[record.Branch] = GitHubState{Status: "unknown"}
+			states[record.Branch] = GitHubState{Status: githubStatusUnavailable}
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
+		state = normalizeGitHubState(state)
 		states[record.Branch] = state
 		usedGH = true
 		cache.Entries[record.Branch] = githubCacheEntry{State: state, FetchedAt: now}
@@ -595,7 +605,7 @@ func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
 		return GitHubState{}, fmt.Errorf("parse gh output: %w", err)
 	}
 	if len(rawPRs) == 0 {
-		return GitHubState{Status: "available"}, nil
+		return GitHubState{Status: githubStatusNotFound}, nil
 	}
 	// A branch normally has one PR. Prefer an open PR, otherwise the most
 	// recently listed historical PR, which is what gh returns first.
@@ -613,7 +623,21 @@ func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
 		MergedAt:   selected.MergedAt,
 		URL:        selected.URL,
 		HeadBranch: selected.HeadBranch,
-	}, Status: "available"}, nil
+	}, Status: githubStatusFound}, nil
+}
+
+func normalizeGitHubState(state GitHubState) GitHubState {
+	// Version 1 caches used "available" for both a successful lookup with no
+	// PR and a successful lookup with a PR. Keep those caches useful after the
+	// schema change by deriving the new result status from the presence of PR.
+	if state.Status == "available" {
+		if state.PR == nil {
+			state.Status = githubStatusNotFound
+		} else {
+			state.Status = githubStatusFound
+		}
+	}
+	return state
 }
 
 func gitWorktrees(repoPath string) ([]worktreeRecord, error) {
@@ -701,7 +725,16 @@ func cleanupFor(wt Worktree, isRepository bool) CleanupState {
 	if wt.Agent.Lifecycle == "active" {
 		return CleanupState{Recommendation: "keep", Reasons: []string{"agent_session_active"}}
 	}
-	if wt.GitHub.Status == "unknown" || wt.GitHub.Status == "unavailable" {
+	switch wt.GitHub.Status {
+	case githubStatusUnknown:
+		return CleanupState{Recommendation: "review", Reasons: []string{"github_state_unknown"}}
+	case githubStatusUnavailable:
+		return CleanupState{Recommendation: "review", Reasons: []string{"github_state_unavailable"}}
+	case githubStatusNotFound:
+		return CleanupState{Recommendation: "review", Reasons: []string{"no_pull_request"}}
+	case githubStatusFound:
+		break
+	default:
 		return CleanupState{Recommendation: "review", Reasons: []string{"github_state_unknown"}}
 	}
 	if wt.GitHub.PR == nil {
@@ -866,7 +899,11 @@ func readGitHubCache(repoPath string) (githubCache, error) {
 	if cache.Repository != "" && mustAbs(cache.Repository) != mustAbs(repoPath) {
 		return githubCache{}, errors.New("GitHub cache repository does not match current repository")
 	}
-	if cache.Version == 0 {
+	if cache.Version != githubCacheVersion {
+		for branch, entry := range cache.Entries {
+			entry.State = normalizeGitHubState(entry.State)
+			cache.Entries[branch] = entry
+		}
 		cache.Version = githubCacheVersion
 	}
 	if cache.Entries == nil {
@@ -1086,7 +1123,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw list")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "現在のリポジトリに紐づくGit worktreeを一覧表示します。列はPATH、BRANCH、GIT（clean/dirty）、AGENT、CLEANUP（recommended/review/keep）です。")
-		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownとして扱います。GitHub PR情報は直近30分以内のキャッシュを再利用します。")
+		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownまたはunavailableとして扱います。GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    schema_version、repository、worktrees、sources、errorsを含む構造化出力（詳細は gw guide json）")
@@ -1136,8 +1173,10 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
 		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
 		fmt.Fprintln(w)
+		fmt.Fprintln(w, "worktrees[].github.statusはPR検索結果（found、not_found、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "sources.githubはGitHub PR情報の取得元（gh、cache、unknown、unavailable）を表します。")
-		fmt.Fprintln(w, "取得できない値はnullまたはunknownで表現し、推測しません。")
+		fmt.Fprintln(w, "取得できない値はnullまたはunknown/unavailableで表現し、推測しません。")
+		fmt.Fprintln(w, "statusの意味を変更したため、schema_versionは2です。")
 		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、removed、errorsを含みます（詳細は gw guide clean）。")
 	}
 }
