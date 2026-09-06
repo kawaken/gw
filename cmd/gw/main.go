@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 )
@@ -23,6 +25,15 @@ const (
 	githubCacheVersion = 2
 	githubCacheTTL     = 30 * time.Minute
 )
+
+// execTimeout bounds every git/gh subprocess call so a single hung process
+// (e.g. an unresponsive git fsmonitor--daemon) cannot hang gw forever. It is
+// a var, not a const, so tests can shrink it to exercise the timeout path.
+var execTimeout = 10 * time.Second
+
+// maxWorktreeConcurrency bounds how many worktrees' git/GitHub state gw
+// collects at once, so one hung or slow worktree does not delay the rest.
+const maxWorktreeConcurrency = 6
 
 const (
 	githubStatusFound       = "found"
@@ -489,20 +500,31 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 		result.Errors = append(result.Errors, ResultError{Source: "agent", Code: "state_unavailable", Message: sessionErr.Error()})
 	}
 
-	for _, record := range records {
-		wt := Worktree{
-			Path:     record.Path,
-			Branch:   record.Branch,
-			Head:     record.Head,
-			Detached: record.Detached,
-			Locked:   record.Locked,
-			Git:      collectGitState(record),
-			GitHub:   githubStates[record.Branch],
-			Agent:    agentForPath(record.Path, sessions),
-		}
-		wt.Cleanup = cleanupFor(wt, record.Path == repoPath)
-		result.Worktrees = append(result.Worktrees, wt)
+	worktrees := make([]Worktree, len(records))
+	sem := make(chan struct{}, maxWorktreeConcurrency)
+	var wg sync.WaitGroup
+	for i, record := range records {
+		wg.Add(1)
+		go func(i int, record worktreeRecord) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			wt := Worktree{
+				Path:     record.Path,
+				Branch:   record.Branch,
+				Head:     record.Head,
+				Detached: record.Detached,
+				Locked:   record.Locked,
+				Git:      collectGitState(record),
+				GitHub:   githubStates[record.Branch],
+				Agent:    agentForPath(record.Path, sessions),
+			}
+			wt.Cleanup = cleanupFor(wt, record.Path == repoPath)
+			worktrees[i] = wt
+		}(i, record)
 	}
+	wg.Wait()
+	result.Worktrees = worktrees
 	sort.SliceStable(result.Worktrees, func(i, j int) bool {
 		return result.Worktrees[i].Path < result.Worktrees[j].Path
 	})
@@ -531,6 +553,11 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 	usedGH := false
 	cacheUpdated := false
 	now := time.Now().UTC()
+
+	// First pass: decide, per unique branch, whether the cache already
+	// answers it or whether it needs a (potentially slow) gh call. This pass
+	// touches no subprocess, so it stays sequential.
+	var toFetch []string
 	for _, record := range records {
 		if record.Branch == "" {
 			states[record.Branch] = GitHubState{Status: githubStatusUnknown}
@@ -550,20 +577,40 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 			states[record.Branch] = GitHubState{Status: githubStatusUnavailable}
 			continue
 		}
-		state, err := githubPRFetcher(repoPath, record.Branch)
-		if err != nil {
-			states[record.Branch] = GitHubState{Status: githubStatusUnavailable}
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		state = normalizeGitHubState(state)
-		states[record.Branch] = state
-		usedGH = true
-		cache.Entries[record.Branch] = githubCacheEntry{State: state, FetchedAt: now}
-		cacheUpdated = true
+		states[record.Branch] = GitHubState{} // reserved; filled in by the fetch pass below
+		toFetch = append(toFetch, record.Branch)
 	}
+
+	// Second pass: run the gh calls that survived the cache concurrently, so
+	// one slow or hung branch lookup does not delay the others.
+	var mu sync.Mutex
+	sem := make(chan struct{}, maxWorktreeConcurrency)
+	var wg sync.WaitGroup
+	for _, branch := range toFetch {
+		wg.Add(1)
+		go func(branch string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			state, err := githubPRFetcher(repoPath, branch)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				states[branch] = GitHubState{Status: githubStatusUnavailable}
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			state = normalizeGitHubState(state)
+			states[branch] = state
+			usedGH = true
+			cache.Entries[branch] = githubCacheEntry{State: state, FetchedAt: now}
+			cacheUpdated = true
+		}(branch)
+	}
+	wg.Wait()
+
 	if cacheUpdated {
 		if err := writeGitHubCache(repoPath, cache); err != nil && firstErr == nil {
 			firstErr = err
@@ -591,10 +638,15 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 }
 
 func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
-	cmd := exec.Command("gh", "pr", "list", "--state", "all", "--head", branch, "--limit", "10", "--json", "number,title,state,mergedAt,url,headRefName")
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--state", "all", "--head", branch, "--limit", "10", "--json", "number,title,state,mergedAt,url,headRefName")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return GitHubState{}, fmt.Errorf("gh pr list for %s timed out after %s", branch, execTimeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
 			return GitHubState{}, errors.New(strings.TrimSpace(string(exitErr.Stderr)))
 		}
@@ -961,12 +1013,17 @@ func gitOutput(args ...string) (string, error) {
 }
 
 func gitOutputFrom(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), execTimeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			message := strings.TrimSpace(string(exitErr.Stderr))
 			if message != "" {
@@ -979,12 +1036,17 @@ func gitOutputFrom(dir string, args ...string) (string, error) {
 }
 
 func gitRun(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), execTimeout)
+		}
 		if message := strings.TrimSpace(stderr.String()); message != "" {
 			return errors.New(message)
 		}
@@ -1141,6 +1203,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "# gw refresh")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Gitと、利用可能なGitHub/agentの連携先から現在の状態を再取得して表示し、GitHub PR情報のキャッシュも更新します。")
+		fmt.Fprintln(w, "内部で実行するgit/ghコマンドは既定10秒でタイムアウトし、無応答なプロセス（壊れたfsmonitorデーモンなど）があっても全体はハングしません。worktreeごとの状態取得は並行実行されます。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
