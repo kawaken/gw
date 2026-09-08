@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +258,126 @@ func TestGitRunIncludesGitError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "fatal:") {
 		t.Fatalf("gitRun error = %q, want Git stderr", err)
+	}
+}
+
+func TestGitOutputFromTimesOut(t *testing.T) {
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+
+	original := execTimeout
+	execTimeout = time.Nanosecond
+	t.Cleanup(func() { execTimeout = original })
+
+	_, err := gitOutputFrom(repoPath, "status", "--porcelain")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("gitOutputFrom error = %v, want a timeout error", err)
+	}
+}
+
+func TestGitRunTimesOut(t *testing.T) {
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+
+	original := execTimeout
+	execTimeout = time.Nanosecond
+	t.Cleanup(func() { execTimeout = original })
+
+	err := gitRun(repoPath, "status")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("gitRun error = %v, want a timeout error", err)
+	}
+}
+
+func TestGithubPRForBranchTimesOut(t *testing.T) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.Skip("gh is not installed")
+	}
+
+	original := execTimeout
+	execTimeout = time.Nanosecond
+	t.Cleanup(func() { execTimeout = original })
+
+	_, err := githubPRForBranch(t.TempDir(), "does-not-matter")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("githubPRForBranch error = %v, want a timeout error", err)
+	}
+}
+
+// TestCollectResultProcessesWorktreesConcurrently makes several worktrees'
+// `git status` hang behind a fake `git` shimmed onto PATH and asserts that
+// collectResult finishes in roughly one delay's worth of time rather than
+// one delay per hung worktree, i.e. that worktrees are processed
+// concurrently rather than one at a time.
+func TestCollectResultProcessesWorktreesConcurrently(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git shim is a POSIX shell script")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+	gitTestCommand(t, repoPath, "config", "user.email", "test@example.com")
+	gitTestCommand(t, repoPath, "config", "user.name", "Test User")
+	gitTestCommand(t, repoPath, "config", "commit.gpgsign", "false")
+	// This test injects its own artificial delay via the fake git shim below;
+	// disable fsmonitor at the repo level (not just per gitTestCommand
+	// invocation) so a developer machine with core.fsmonitor=true globally
+	// configured cannot add an unrelated, real fsmonitor-daemon delay that
+	// would make the timing assertion below flaky.
+	gitTestCommand(t, repoPath, "config", "core.fsmonitor", "false")
+	if err := os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "add", "file.txt")
+	gitTestCommand(t, repoPath, "commit", "--quiet", "-m", "initial")
+
+	const numDelayedWorktrees = 3
+	var delayedPaths []string
+	for i := 0; i < numDelayedWorktrees; i++ {
+		wtPath := filepath.Join(t.TempDir(), fmt.Sprintf("delayed-%d", i))
+		gitTestCommand(t, repoPath, "worktree", "add", "--quiet", "-b", fmt.Sprintf("delayed-%d", i), wtPath)
+		delayedPaths = append(delayedPaths, mustAbs(wtPath))
+	}
+
+	fakeBinDir := t.TempDir()
+	markerPath := filepath.Join(fakeBinDir, "delayed-dirs.txt")
+	if err := os.WriteFile(markerPath, []byte(strings.Join(delayedPaths, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const delay = 300 * time.Millisecond
+	sleepSeconds := fmt.Sprintf("%.3f", delay.Seconds())
+	script := "#!/bin/sh\n" +
+		"dir=$(pwd)\n" +
+		"if [ \"$1\" = \"status\" ] && grep -qxF \"$dir\" \"" + markerPath + "\"; then sleep " + sleepSeconds + "; fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	originalLookPath := lookPath
+	t.Cleanup(func() { lookPath = originalLookPath })
+	lookPath = func(string) (string, error) { return "", exec.ErrNotFound } // skip gh entirely
+
+	t.Chdir(repoPath)
+	start := time.Now()
+	result, err := collectResult(false)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("collectResult returned error: %v", err)
+	}
+	if len(result.Worktrees) != numDelayedWorktrees+1 {
+		t.Fatalf("got %d worktrees, want %d", len(result.Worktrees), numDelayedWorktrees+1)
+	}
+	// Serial processing would take at least numDelayedWorktrees*delay; give
+	// generous slack above a single delay to keep this from being flaky.
+	if elapsed >= delay*time.Duration(numDelayedWorktrees) {
+		t.Fatalf("collectResult took %s, worktrees do not appear to have been processed concurrently", elapsed)
 	}
 }
 
