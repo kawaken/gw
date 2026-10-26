@@ -32,6 +32,14 @@ func TestParseWorktreeList(t *testing.T) {
 	if !got[2].Detached {
 		t.Fatal("detached worktree was not marked detached")
 	}
+
+	locked, err := parseWorktreeList("worktree /tmp/a\nHEAD abc\nbranch refs/heads/a\nlocked\n\nworktree /tmp/b\nHEAD def\nbranch refs/heads/b\nlocked busy\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked[0].Locked || !locked[1].Locked {
+		t.Fatalf("locked worktrees = %+v, want both locked", locked)
+	}
 }
 
 func TestCleanupFor(t *testing.T) {
@@ -53,6 +61,7 @@ func TestCleanupFor(t *testing.T) {
 	}
 	base.Agent.Lifecycle = "ended"
 	base.GitHub = GitHubState{Status: githubStatusFound, PR: &PullRequest{State: "MERGED"}}
+	base.Git.Unpushed = intPtr(0)
 	if got := cleanupFor(base, false); got.Recommendation != "recommended" {
 		t.Fatalf("merged PR recommendation = %q, want recommended", got.Recommendation)
 	}
@@ -830,7 +839,7 @@ func TestRunAgentEventManaged(t *testing.T) {
 
 func TestCleanupForManagedAndLock(t *testing.T) {
 	merged := Worktree{
-		Git:    GitState{Clean: true},
+		Git:    GitState{Clean: true, Unpushed: intPtr(0)},
 		Agent:  AgentState{Lifecycle: "managed"},
 		GitHub: GitHubState{Status: githubStatusFound, PR: &PullRequest{State: "MERGED"}},
 	}
@@ -999,5 +1008,335 @@ func TestMatchTarget(t *testing.T) {
 	}
 	if _, err := matchTarget(records, "nope"); err == nil {
 		t.Fatal("unknown worktree matched")
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+func TestCleanupForUnpushedCommits(t *testing.T) {
+	wt := Worktree{
+		Git:    GitState{Clean: true, Unpushed: intPtr(2)},
+		Agent:  AgentState{Lifecycle: "ended"},
+		GitHub: GitHubState{Status: githubStatusFound, PR: &PullRequest{State: "MERGED"}},
+	}
+	if got := cleanupFor(wt, false); got.Recommendation != "review" || got.Reasons[0] != "unpushed_commits" {
+		t.Fatalf("unpushed cleanup = %+v, want review/unpushed_commits", got)
+	}
+	wt.Git.Unpushed = nil
+	if got := cleanupFor(wt, false); got.Recommendation != "review" || got.Reasons[0] != "unpushed_unknown" {
+		t.Fatalf("unknown unpushed cleanup = %+v, want review/unpushed_unknown", got)
+	}
+	wt.GitHub.PR.State = "OPEN"
+	if got := cleanupFor(wt, false); got.Reasons[0] != "pull_request_open" {
+		t.Fatalf("open PR reasons = %v, want pull_request_open unchanged", got.Reasons)
+	}
+}
+
+func TestUnpushedCommits(t *testing.T) {
+	repoPath := newTestRepo(t)
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	gitTestCommand(t, repoPath, "worktree", "add", "--quiet", "-b", "feature", wtPath, "main")
+	if got := unpushedCommits(wtPath, ""); got == nil || *got != 0 {
+		t.Fatalf("fresh branch unpushed = %v, want 0", got)
+	}
+	for i := 0; i < 2; i++ {
+		gitTestCommand(t, wtPath, "commit", "--quiet", "--allow-empty", "-m", fmt.Sprintf("work %d", i))
+	}
+	if got := unpushedCommits(wtPath, ""); got == nil || *got != 2 {
+		t.Fatalf("unpushed = %v, want 2", got)
+	}
+	// After a squash merge whose remote branch was deleted, commits up to the
+	// PR head count as pushed; later commits do not.
+	head := strings.TrimSpace(gitTestOutput(t, wtPath, "rev-parse", "HEAD"))
+	if got := unpushedCommits(wtPath, head); got == nil || *got != 0 {
+		t.Fatalf("unpushed with merged head = %v, want 0", got)
+	}
+	gitTestCommand(t, wtPath, "commit", "--quiet", "--allow-empty", "-m", "after merge")
+	if got := unpushedCommits(wtPath, head); got == nil || *got != 1 {
+		t.Fatalf("unpushed after merge = %v, want 1", got)
+	}
+	// An unknown PR head is ignored rather than failing.
+	if got := unpushedCommits(wtPath, "0123456789abcdef0123456789abcdef01234567"); got == nil || *got != 3 {
+		t.Fatalf("unpushed with unknown head = %v, want 3", got)
+	}
+	gitTestCommand(t, wtPath, "push", "--quiet", "origin", "feature")
+	if got := unpushedCommits(wtPath, ""); got == nil || *got != 0 {
+		t.Fatalf("unpushed after push = %v, want 0", got)
+	}
+}
+
+func gitTestOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s failed: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
+}
+
+func TestDecideClean(t *testing.T) {
+	recommended := CleanupState{Recommendation: "recommended", Reasons: []string{"pull_request_merged", "worktree_clean"}}
+	tests := []struct {
+		name    string
+		wt      Worktree
+		force0  bool
+		force1  bool
+		force2  bool
+		reasons []string
+	}{
+		{name: "merged and clean", wt: Worktree{Path: "/wt/a", Cleanup: recommended}, force0: true, force1: true, force2: true, reasons: []string{"pull_request_merged", "worktree_clean"}},
+		{name: "dirty", wt: Worktree{Path: "/wt/a", Cleanup: CleanupState{Recommendation: "review", Reasons: []string{"worktree_dirty"}}}, force1: true, force2: true, reasons: []string{"worktree_dirty"}},
+		{name: "unpushed", wt: Worktree{Path: "/wt/a", Cleanup: CleanupState{Recommendation: "review", Reasons: []string{"unpushed_commits"}}}, force1: true, force2: true, reasons: []string{"unpushed_commits"}},
+		{name: "hook active", wt: Worktree{Path: "/wt/a", Agent: AgentState{Lifecycle: "active"}, Cleanup: CleanupState{Recommendation: "keep"}}, force2: true, reasons: []string{"agent_session_active"}},
+		{name: "gw lock alive", wt: Worktree{Path: "/wt/a", Lock: &LockState{PID: 1, Alive: true}, Cleanup: CleanupState{Recommendation: "keep"}}, force2: true, reasons: []string{"agent_process_running"}},
+		{name: "gw lock stale", wt: Worktree{Path: "/wt/a", Lock: &LockState{PID: 1, Alive: false}, Cleanup: recommended}, force0: true, force1: true, force2: true, reasons: []string{"pull_request_merged", "worktree_clean"}},
+		{name: "git lock", wt: Worktree{Path: "/wt/a", Locked: true, Cleanup: CleanupState{Recommendation: "keep"}}, force2: true, reasons: []string{"worktree_locked"}},
+		{name: "main worktree", wt: Worktree{Path: "/repo", Cleanup: CleanupState{Recommendation: "keep"}}, reasons: []string{"main_worktree"}},
+		{name: "current worktree", wt: Worktree{Path: "/cwd", Cleanup: CleanupState{Recommendation: "keep"}}, reasons: []string{"current_worktree"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for force, want := range []bool{tt.force0, tt.force1, tt.force2} {
+				reasons, _, ok := decideClean(tt.wt, "/repo", "/cwd", force)
+				if ok != want {
+					t.Fatalf("force=%d: ok = %v, want %v (reasons %v)", force, ok, want, reasons)
+				}
+				if strings.Join(reasons, ",") != strings.Join(tt.reasons, ",") {
+					t.Fatalf("force=%d: reasons = %v, want %v", force, reasons, tt.reasons)
+				}
+			}
+		})
+	}
+}
+
+// setupCleanRepo creates a repository with linked worktrees and stubs GitHub
+// so each branch's PR state comes from prStates (missing = no PR).
+func setupCleanRepo(t *testing.T, prStates map[string]string, names ...string) (string, map[string]string) {
+	t.Helper()
+	repoPath := newTestRepo(t)
+	t.Setenv("GW_WORKTREE_ROOT", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Chdir(repoPath)
+	paths := make(map[string]string)
+	for _, name := range names {
+		code, stdout, stderr := runGW(t, "new", name, "--base", "main")
+		if code != 0 {
+			t.Fatalf("gw new %s returned %d: %s", name, code, stderr)
+		}
+		paths[name] = strings.TrimSpace(stdout)
+	}
+	originalLookPath := lookPath
+	originalFetcher := githubPRFetcher
+	t.Cleanup(func() {
+		lookPath = originalLookPath
+		githubPRFetcher = originalFetcher
+	})
+	lookPath = func(string) (string, error) { return "/usr/bin/gh", nil }
+	githubPRFetcher = func(repo, branch string) (GitHubState, error) {
+		state, ok := prStates[branch]
+		if !ok {
+			return GitHubState{Status: githubStatusNotFound}, nil
+		}
+		head := ""
+		if path, ok := paths[branch]; ok {
+			head = strings.TrimSpace(gitTestOutput(t, path, "rev-parse", "HEAD"))
+		}
+		return GitHubState{Status: githubStatusFound, PR: &PullRequest{Number: 1, State: state, HeadOID: head}}, nil
+	}
+	return repoPath, paths
+}
+
+func branchExists(t *testing.T, repoPath, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	cmd.Dir = repoPath
+	return cmd.Run() == nil
+}
+
+func decodeCleanup(t *testing.T, stdout string) CleanupReport {
+	t.Helper()
+	var report CleanupReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if report.SchemaVersion != 3 {
+		t.Fatalf("schema_version = %d, want 3", report.SchemaVersion)
+	}
+	return report
+}
+
+func TestRunCleanTargetsWithoutForce(t *testing.T) {
+	repoPath, paths := setupCleanRepo(t, map[string]string{"merged": "MERGED", "dirty": "OPEN"}, "merged", "dirty", "nopr")
+	if err := os.WriteFile(filepath.Join(paths["dirty"], "new.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head := strings.TrimSpace(gitTestOutput(t, paths["merged"], "rev-parse", "HEAD"))
+
+	code, stdout, stderr := runGW(t, "clean", "merged", "dirty", "nopr", "--json")
+	if code != 0 {
+		t.Fatalf("gw clean returned %d: %s", code, stderr)
+	}
+	report := decodeCleanup(t, stdout)
+	if len(report.Removed) != 1 {
+		t.Fatalf("removed = %+v, want only merged", report.Removed)
+	}
+	removed := report.Removed[0]
+	if removed.Path != paths["merged"] || removed.Branch != "merged" || removed.Commit != head || !removed.DeleteBranch || removed.PRState != "MERGED" {
+		t.Fatalf("removed entry = %+v", removed)
+	}
+	if branchExists(t, repoPath, "merged") {
+		t.Fatal("branch merged was not deleted")
+	}
+	skipped := map[string]CleanupEntry{}
+	for _, e := range report.Skipped {
+		skipped[e.Branch] = e
+	}
+	if e := skipped["dirty"]; e.Reasons[0] != "worktree_dirty" || e.Uncommitted != 1 || e.DeleteBranch {
+		t.Fatalf("dirty skipped entry = %+v", e)
+	}
+	if e := skipped["nopr"]; e.Reasons[0] != "no_pull_request" {
+		t.Fatalf("nopr skipped entry = %+v", e)
+	}
+	for _, name := range []string{"dirty", "nopr"} {
+		if _, err := os.Stat(paths[name]); err != nil || !branchExists(t, repoPath, name) {
+			t.Fatalf("%s was removed: %v", name, err)
+		}
+	}
+}
+
+func TestRunCleanForceAndSaveBranch(t *testing.T) {
+	repoPath, paths := setupCleanRepo(t, map[string]string{}, "dirty", "keepbranch")
+	if err := os.WriteFile(filepath.Join(paths["dirty"], "new.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, paths["dirty"], "commit", "--quiet", "--allow-empty", "-m", "unpushed")
+
+	// dry-run shows what would be lost and removes nothing.
+	code, stdout, stderr := runGW(t, "clean", "dirty", "--force", "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("dry-run returned %d: %s", code, stderr)
+	}
+	report := decodeCleanup(t, stdout)
+	if len(report.Planned) != 1 || len(report.Removed) != 0 {
+		t.Fatalf("dry-run report = %+v", report)
+	}
+	planned := report.Planned[0]
+	if !planned.Forced || planned.Uncommitted != 1 || planned.Unpushed == nil || *planned.Unpushed != 1 || !planned.DeleteBranch {
+		t.Fatalf("planned entry = %+v", planned)
+	}
+	if _, err := os.Stat(paths["dirty"]); err != nil {
+		t.Fatalf("dry-run removed the worktree: %v", err)
+	}
+
+	code, stdout, stderr = runGW(t, "clean", "dirty", "--force")
+	if code != 0 {
+		t.Fatalf("force returned %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "deleted branch dirty (was ") {
+		t.Fatalf("output does not show the deleted branch commit:\n%s", stdout)
+	}
+	if _, err := os.Stat(paths["dirty"]); err == nil || branchExists(t, repoPath, "dirty") {
+		t.Fatal("dirty worktree or branch remains after --force")
+	}
+
+	code, stdout, stderr = runGW(t, "clean", "keepbranch", "--force", "--save-branch", "--json")
+	if code != 0 {
+		t.Fatalf("save-branch returned %d: %s", code, stderr)
+	}
+	report = decodeCleanup(t, stdout)
+	if len(report.Removed) != 1 || report.Removed[0].DeleteBranch {
+		t.Fatalf("save-branch report = %+v", report.Removed)
+	}
+	if _, err := os.Stat(paths["keepbranch"]); err == nil || !branchExists(t, repoPath, "keepbranch") {
+		t.Fatal("--save-branch must remove the worktree and keep the branch")
+	}
+}
+
+func TestRunCleanLocksNeedDoubleForce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX commands")
+	}
+	repoPath, paths := setupCleanRepo(t, map[string]string{"locked": "MERGED", "gitlocked": "MERGED"}, "locked", "gitlocked")
+	if code, _, stderr := runGW(t, "lock", "locked", "--pid", strconv.Itoa(os.Getpid())); code != 0 {
+		t.Fatalf("lock returned %d: %s", code, stderr)
+	}
+	gitTestCommand(t, repoPath, "worktree", "lock", paths["gitlocked"])
+
+	code, stdout, stderr := runGW(t, "clean", "locked", "gitlocked", "--force", "--json")
+	if code != 0 {
+		t.Fatalf("single force returned %d: %s", code, stderr)
+	}
+	report := decodeCleanup(t, stdout)
+	if len(report.Removed) != 0 || len(report.Skipped) != 2 {
+		t.Fatalf("single force report = %+v", report)
+	}
+	reasons := map[string]string{}
+	for _, e := range report.Skipped {
+		reasons[e.Branch] = e.Reasons[0]
+	}
+	if reasons["locked"] != "agent_process_running" || reasons["gitlocked"] != "worktree_locked" {
+		t.Fatalf("skip reasons = %v", reasons)
+	}
+
+	code, stdout, stderr = runGW(t, "clean", "locked", "gitlocked", "--force", "--force", "--json")
+	if code != 0 {
+		t.Fatalf("double force returned %d: %s", code, stderr)
+	}
+	report = decodeCleanup(t, stdout)
+	if len(report.Removed) != 2 {
+		t.Fatalf("double force report = %+v", report)
+	}
+	for _, name := range []string{"locked", "gitlocked"} {
+		if _, err := os.Stat(paths[name]); err == nil || branchExists(t, repoPath, name) {
+			t.Fatalf("%s remains after --force --force", name)
+		}
+	}
+	if lockStateFor(paths["locked"]) != nil {
+		t.Fatal("gw lock remains after the worktree was removed")
+	}
+}
+
+func TestRunCleanRefusesMainAndReportsUnknownTargets(t *testing.T) {
+	repoPath, paths := setupCleanRepo(t, map[string]string{}, "other")
+	code, stdout, stderr := runGW(t, "clean", "main", "missing", "other", "--force", "--force", "--json")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (stderr: %s)", code, stderr)
+	}
+	report := decodeCleanup(t, stdout)
+	if len(report.Skipped) != 1 || report.Skipped[0].Reasons[0] != "main_worktree" {
+		t.Fatalf("skipped = %+v, want main_worktree", report.Skipped)
+	}
+	if len(report.Errors) == 0 || report.Errors[len(report.Errors)-1].Code != "worktree_not_found" {
+		t.Fatalf("errors = %+v, want worktree_not_found", report.Errors)
+	}
+	// The remaining target is still processed.
+	if len(report.Removed) != 1 || report.Removed[0].Path != paths["other"] {
+		t.Fatalf("removed = %+v", report.Removed)
+	}
+	if _, err := os.Stat(repoPath); err != nil {
+		t.Fatalf("main worktree removed: %v", err)
+	}
+	if code, _, _ := runGW(t, "clean", "--force"); code != 2 {
+		t.Fatalf("--force without targets returned %d, want 2", code)
+	}
+}
+
+func TestRunCleanWithoutTargetsDeletesBranches(t *testing.T) {
+	repoPath, _ := setupCleanRepo(t, map[string]string{"merged": "MERGED", "open": "OPEN"}, "merged", "open")
+	code, stdout, stderr := runGW(t, "clean", "--json")
+	if code != 0 {
+		t.Fatalf("gw clean returned %d: %s", code, stderr)
+	}
+	report := decodeCleanup(t, stdout)
+	if len(report.Removed) != 1 || report.Removed[0].Branch != "merged" || !report.Removed[0].DeleteBranch {
+		t.Fatalf("removed = %+v", report.Removed)
+	}
+	if len(report.Skipped) != 0 {
+		t.Fatalf("skipped must be empty without targets: %+v", report.Skipped)
+	}
+	if branchExists(t, repoPath, "merged") || !branchExists(t, repoPath, "open") {
+		t.Fatal("unexpected branch state after gw clean")
 	}
 }
