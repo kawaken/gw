@@ -61,6 +61,7 @@ type Worktree struct {
 	Head     string       `json:"head,omitempty"`
 	Detached bool         `json:"detached,omitempty"`
 	Locked   bool         `json:"locked,omitempty"`
+	Lock     *LockState   `json:"lock,omitempty"`
 	Git      GitState     `json:"git"`
 	GitHub   GitHubState  `json:"github"`
 	Agent    AgentState   `json:"agent"`
@@ -198,6 +199,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRefresh(args[1:], stdout, stderr)
 	case "new":
 		return runNew(args[1:], stdout, stderr)
+	case "lock":
+		return runLock(args[1:], stdout, stderr)
+	case "unlock":
+		return runUnlock(args[1:], stdout, stderr)
 	case "clean":
 		return runClean(args[1:], stdout, stderr)
 	case "guide":
@@ -385,7 +390,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "list", "inspect", "refresh", "new", "clean", "json":
+	case "list", "inspect", "refresh", "new", "lock", "clean", "json":
 		printGuideTopic(stdout, args[0])
 		return 0
 	case "agent-hook":
@@ -397,7 +402,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "gw guide: unknown topic %q\n", args[0])
-		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, new, clean, json, agent-hook claude|codex")
+		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, new, lock, clean, json, agent-hook claude|codex")
 		return 2
 	}
 }
@@ -431,6 +436,13 @@ func runAgentEvent(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		lifecycle = "ended"
 	default:
 		return printCommandError(stderr, fmt.Errorf("unsupported hook event %q", event.Event))
+	}
+	// A session started by an external tool is protected by gw lock, which the
+	// tool controls, rather than by hooks that may not fire. Keep the record
+	// for the session/worktree link, but do not let it mark the worktree as
+	// running or finished.
+	if managedSession() {
+		lifecycle = "managed"
 	}
 
 	path, err := statePath("sessions.json")
@@ -467,6 +479,16 @@ func runAgentEvent(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return printCommandError(stderr, err)
 	}
 	return 0
+}
+
+// managedSession reports whether GW_MANAGED marks the agent as started by an
+// external tool. Empty, "0", and "false" mean not managed.
+func managedSession() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GW_MANAGED"))) {
+	case "", "0", "false":
+		return false
+	}
+	return true
 }
 
 func collectResult(forceGitHubRefresh bool) (Result, error) {
@@ -517,6 +539,7 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 				Head:     record.Head,
 				Detached: record.Detached,
 				Locked:   record.Locked,
+				Lock:     lockStateFor(record.Path),
 				Git:      collectGitState(record),
 				GitHub:   githubStates[record.Branch],
 				Agent:    agentForPath(record.Path, sessions),
@@ -772,6 +795,9 @@ func cleanupFor(wt Worktree, isRepository bool) CleanupState {
 	}
 	if wt.Locked {
 		return CleanupState{Recommendation: "keep", Reasons: []string{"worktree_locked"}}
+	}
+	if wt.Lock != nil && wt.Lock.Alive {
+		return CleanupState{Recommendation: "keep", Reasons: []string{"agent_process_running"}}
 	}
 	if !wt.Git.Clean {
 		return CleanupState{Recommendation: "review", Reasons: []string{"worktree_dirty"}}
@@ -1137,6 +1163,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  inspect    worktreeの詳細と判定理由を表示")
 	fmt.Fprintln(w, "  refresh    Git/GitHubの状態を更新")
 	fmt.Fprintln(w, "  new        worktreeを作成")
+	fmt.Fprintln(w, "  lock       worktreeでプロセスが実行中であることを宣言")
+	fmt.Fprintln(w, "  unlock     gw lockを解除")
 	fmt.Fprintln(w, "  clean      cleanup推奨対象を削除")
 	fmt.Fprintln(w, "  guide      AI向けに各サブコマンドの使い方や連携方法を説明")
 	fmt.Fprintln(w)
@@ -1162,6 +1190,13 @@ func printInspect(w io.Writer, repoPath string, wt Worktree) {
 	fmt.Fprintf(w, "HEAD: %s\n", wt.Head)
 	fmt.Fprintf(w, "Git: %s\n", gitStatus(wt))
 	fmt.Fprintf(w, "Agent: %s\n", agentStatus(wt.Agent))
+	if wt.Lock != nil {
+		state := "stale"
+		if wt.Lock.Alive {
+			state = "running"
+		}
+		fmt.Fprintf(w, "Lock: pid %d (%s)\n", wt.Lock.PID, state)
+	}
 	fmt.Fprintf(w, "Cleanup: %s\n", wt.Cleanup.Recommendation)
 	if len(wt.Cleanup.Reasons) > 0 {
 		fmt.Fprintln(w, "Reasons:")
@@ -1181,6 +1216,8 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw inspect <worktree> [--json]")
 	fmt.Fprintln(w, "- gw refresh [--json]")
 	fmt.Fprintln(w, "- gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
+	fmt.Fprintln(w, "- gw lock <worktree> --pid <pid>")
+	fmt.Fprintln(w, "- gw unlock <worktree>")
 	fmt.Fprintln(w, "- gw clean --dry-run [--json]")
 	fmt.Fprintln(w, "- gw clean")
 	fmt.Fprintln(w)
@@ -1189,6 +1226,7 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw guide inspect")
 	fmt.Fprintln(w, "- gw guide refresh")
 	fmt.Fprintln(w, "- gw guide new")
+	fmt.Fprintln(w, "- gw guide lock")
 	fmt.Fprintln(w, "- gw guide clean")
 	fmt.Fprintln(w, "- gw guide json")
 	fmt.Fprintln(w, "- gw guide agent-hook claude|codex")
@@ -1249,6 +1287,24 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "  6  配置先が既に存在する（別ブランチのworktree、worktreeでないディレクトリなど）")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "gw cleanでこの配置先のworktreeを削除し、<repo>ディレクトリが空になった場合は<repo>ディレクトリも削除します。")
+	case "lock":
+		fmt.Fprintln(w, "# gw lock <worktree> --pid <pid> / gw unlock <worktree>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "外部ツールがエージェントのCLIを起動するときに、そのプロセスがworktreeで実行中であることを宣言します。単位はセッションではなくプロセス（CLIの1回の起動）です。")
+		fmt.Fprintln(w, "生きているプロセスのlockがあるworktreeはcleanup判定がkeep（理由 agent_process_running）になり、gw cleanで削除されません。")
+		fmt.Fprintln(w, "gwは判定のたびにPIDの生存を確認します。プロセスが終了していれば古いlockとして扱い、保護しません（呼び出し側が落ちてもlockは残り続けません）。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<worktree>はパス、ブランチ名、ディレクトリ名のいずれかで指定します。")
+		fmt.Fprintln(w, "lock: --pid（必須）のプロセスが存在しない場合、または別の生きているプロセスがlock中の場合は終了コード1で失敗します。同じPIDでの再実行と、古いlockの上書きは成功します。")
+		fmt.Fprintln(w, "unlock: lockを削除します。lockがなくても成功します。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "外部ツールからの使い方:")
+		fmt.Fprintln(w, "  1. gw new <name> でworktreeを作成")
+		fmt.Fprintln(w, "  2. 環境変数 GW_MANAGED=1 を付けてエージェントのCLIを起動し、gw lock <worktree> --pid <CLIのPID>")
+		fmt.Fprintln(w, "  3. CLIの終了後に gw unlock <worktree>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "GW_MANAGEDが付いたエージェントのhook（gw agent-event）は、セッションとworktreeの紐付けを記録しますが、lifecycleをactive/endedではなくmanagedにします。managedは実行中として扱わず、実行中の判定はlockだけで行います。")
+		fmt.Fprintln(w, "PIDは再利用されることがあるため、CLIの終了後は速やかにunlockしてください。")
 	case "clean":
 		fmt.Fprintln(w, "# gw clean")
 		fmt.Fprintln(w)
@@ -1262,7 +1318,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "判定基準:")
 		fmt.Fprintln(w, "  recommended  pull requestがMERGED/CLOSED、worktreeがclean、activeなagentがない")
 		fmt.Fprintln(w, "  review       dirty、pull requestがない/open、GitHubの状態が不明などで自動削除しない")
-		fmt.Fprintln(w, "  keep         main worktree、ロック済み、activeなagentがある")
+		fmt.Fprintln(w, "  keep         main worktree、ロック済み、gw lockのプロセスが実行中、activeなagentがある")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "最初に gw clean --dry-run を実行して削除候補を確認することを推奨します。")
 		fmt.Fprintln(w, "削除に失敗した場合はGitの具体的なエラー理由を表示し、終了コード1を返します。")
@@ -1272,12 +1328,14 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "list、inspect、refreshは次のトップレベル構造で出力します。")
 		fmt.Fprintln(w, "  schema_version, repository, worktrees, sources, errors")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、lockedに加えて次の状態を含みます。")
+		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、locked（git worktree lock）に加えて次の状態を含みます。")
+		fmt.Fprintln(w, "  lock     gw lockがある場合だけ出力。pid、locked_at、alive（プロセスが生きているか）")
 		fmt.Fprintln(w, "  git      clean/dirty、upstreamとの差分、最終コミット時刻")
 		fmt.Fprintln(w, "  github   pull requestと取得状態")
 		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
 		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
 		fmt.Fprintln(w)
+		fmt.Fprintln(w, "agent.lifecycleはactive、ended、managed（GW_MANAGED付きで起動され、gw lockで判定するもの）、unknownのいずれかです。")
 		fmt.Fprintln(w, "worktrees[].github.statusはPR検索結果（found、not_found、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "sources.githubはGitHub PR情報の取得元（gh、cache、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "取得できない値はnullまたはunknown/unavailableで表現し、推測しません。")
@@ -1302,6 +1360,7 @@ func printAgentHookGuide(w io.Writer, provider string) {
 		fmt.Fprintln(w, "設定場所: ~/.codex/hooks.json、~/.codex/config.toml、またはプロジェクトの .codex/hooks.json / config.toml")
 	}
 	fmt.Fprintln(w, "hookはstdinのJSONをgwの状態ファイルへ保存し、stdoutには何も出力しません。")
+	fmt.Fprintln(w, "外部ツールが環境変数 GW_MANAGED=1 を付けて起動した場合、lifecycleはmanagedになり、実行中の判定は gw lock で行います（詳細は gw guide lock）。")
 	fmt.Fprintln(w, "動作確認: gw list --json または gw inspect <worktree> --json")
 }
 
