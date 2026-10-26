@@ -30,6 +30,16 @@ $ gw inspect /path/to/worktree
 $ gw inspect feature/foo
 ```
 
+新しい worktree は `new` で作成できます。`origin/main` を fetch してから、名前と同じ新規ブランチで作成し、作成したパスだけを出力します。
+
+```console
+$ gw new fix-login
+/home/user/.local/share/gw/worktrees/repository/fix-login
+$ gw new fix-login --base origin/develop --branch feature/login --json
+```
+
+配置先は `<root>/<repo>/<名前>` です。`<root>` は `--root`、環境変数 `GW_WORKTREE_ROOT`、`${XDG_DATA_HOME:-~/.local/share}/gw/worktrees` の順に決まります。同じ名前の worktree が既にあれば、作り直さずにそのパスを返します。既存のブランチ名を指定した場合や、配置先が別のものと衝突する場合は失敗します。失敗の種類ごとの終了コードは `gw guide new` で確認できます。
+
 削除候補は、まず dry-run で確認できます。
 
 ```console

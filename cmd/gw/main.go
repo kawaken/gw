@@ -196,6 +196,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInspect(args[1:], stdout, stderr)
 	case "refresh":
 		return runRefresh(args[1:], stdout, stderr)
+	case "new":
+		return runNew(args[1:], stdout, stderr)
 	case "clean":
 		return runClean(args[1:], stdout, stderr)
 	case "guide":
@@ -383,7 +385,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "list", "inspect", "refresh", "clean", "json":
+	case "list", "inspect", "refresh", "new", "clean", "json":
 		printGuideTopic(stdout, args[0])
 		return 0
 	case "agent-hook":
@@ -395,7 +397,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "gw guide: unknown topic %q\n", args[0])
-		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, clean, json, agent-hook claude|codex")
+		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, new, clean, json, agent-hook claude|codex")
 		return 2
 	}
 }
@@ -1036,7 +1038,11 @@ func gitOutputFrom(dir string, args ...string) (string, error) {
 }
 
 func gitRun(dir string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	return gitRunTimeout(dir, execTimeout, args...)
+}
+
+func gitRunTimeout(dir string, timeout time.Duration, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
@@ -1045,7 +1051,7 @@ func gitRun(dir string, args ...string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), execTimeout)
+			return fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), timeout)
 		}
 		if message := strings.TrimSpace(stderr.String()); message != "" {
 			return errors.New(message)
@@ -1064,7 +1070,15 @@ func removeWorktree(repoPath, worktreePath string) error {
 		}
 		return removeErr
 	}
-	return verifyErr
+	if verifyErr != nil {
+		return verifyErr
+	}
+	// Worktrees made by gw new live in <root>/<repo>/<name>; drop the <repo>
+	// directory once its last worktree is gone.
+	if root, err := worktreeRoot(""); err == nil {
+		removeEmptyRepoDir(root, worktreePath)
+	}
+	return nil
 }
 
 func verifyWorktreeRemoved(repoPath, worktreePath string) error {
@@ -1122,6 +1136,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  list       worktreeの状態を一覧表示")
 	fmt.Fprintln(w, "  inspect    worktreeの詳細と判定理由を表示")
 	fmt.Fprintln(w, "  refresh    Git/GitHubの状態を更新")
+	fmt.Fprintln(w, "  new        worktreeを作成")
 	fmt.Fprintln(w, "  clean      cleanup推奨対象を削除")
 	fmt.Fprintln(w, "  guide      AI向けに各サブコマンドの使い方や連携方法を説明")
 	fmt.Fprintln(w)
@@ -1165,6 +1180,7 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw list [--json]")
 	fmt.Fprintln(w, "- gw inspect <worktree> [--json]")
 	fmt.Fprintln(w, "- gw refresh [--json]")
+	fmt.Fprintln(w, "- gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
 	fmt.Fprintln(w, "- gw clean --dry-run [--json]")
 	fmt.Fprintln(w, "- gw clean")
 	fmt.Fprintln(w)
@@ -1172,6 +1188,7 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw guide list")
 	fmt.Fprintln(w, "- gw guide inspect")
 	fmt.Fprintln(w, "- gw guide refresh")
+	fmt.Fprintln(w, "- gw guide new")
 	fmt.Fprintln(w, "- gw guide clean")
 	fmt.Fprintln(w, "- gw guide json")
 	fmt.Fprintln(w, "- gw guide agent-hook claude|codex")
@@ -1207,6 +1224,31 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
+	case "new":
+		fmt.Fprintln(w, "# gw new <name>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "現在のリポジトリに、<name>と同名の新規ブランチでworktreeを作成し、パスだけを出力します。作成前にベースのリモートをfetchします（失敗した場合は警告してローカルのrefを使います）。")
+		fmt.Fprintln(w, "配置先は <root>/<repo>/<name> です。<repo>はメインworktreeのディレクトリ名、<root>は --root、GW_WORKTREE_ROOT、${XDG_DATA_HOME:-~/.local/share}/gw/worktrees の順に決まります。")
+		fmt.Fprintln(w, "新しいブランチはベースを追跡しません（最初のpushで自分のupstreamを設定してください）。")
+		fmt.Fprintln(w, "同じ配置先に同じブランチのworktreeが既にあれば、作り直さずにそのパスを返します（created: false）。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --base <ref>       ブランチの起点（既定: origin/main）")
+		fmt.Fprintln(w, "  --branch <branch>  ブランチ名（既定: <name>）")
+		fmt.Fprintln(w, "  --root <dir>       配置先のルート（既定: GW_WORKTREE_ROOT、なければ ${XDG_DATA_HOME:-~/.local/share}/gw/worktrees）")
+		fmt.Fprintln(w, "  --json             schema_version、path、branch、base、created を出力（既存のworktreeを返した場合baseは省略）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<name>には / や \\ や .. を含められません。")
+		fmt.Fprintln(w, "終了コード:")
+		fmt.Fprintln(w, "  0  作成した、または既存のworktreeを返した")
+		fmt.Fprintln(w, "  1  その他のエラー（Gitリポジトリ外、git worktree addの失敗など）")
+		fmt.Fprintln(w, "  2  引数の誤り")
+		fmt.Fprintln(w, "  3  名前またはブランチ名が不正")
+		fmt.Fprintln(w, "  4  ベースが見つからない")
+		fmt.Fprintln(w, "  5  ブランチが既に存在する、または別のworktreeでチェックアウト中")
+		fmt.Fprintln(w, "  6  配置先が既に存在する（別ブランチのworktree、worktreeでないディレクトリなど）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "gw cleanでこの配置先のworktreeを削除し、<repo>ディレクトリが空になった場合は<repo>ディレクトリも削除します。")
 	case "clean":
 		fmt.Fprintln(w, "# gw clean")
 		fmt.Fprintln(w)
