@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const (
 	githubCacheVersion = 2
@@ -48,6 +48,10 @@ type Result struct {
 	Worktrees     []Worktree    `json:"worktrees,omitempty"`
 	Sources       Sources       `json:"sources"`
 	Errors        []ResultError `json:"errors,omitempty"`
+
+	// mainPath is the main worktree (the first entry of git worktree list).
+	// Repository.Path is the worktree gw runs in, which may be a linked one.
+	mainPath string
 }
 
 type Repository struct {
@@ -61,6 +65,7 @@ type Worktree struct {
 	Head     string       `json:"head,omitempty"`
 	Detached bool         `json:"detached,omitempty"`
 	Locked   bool         `json:"locked,omitempty"`
+	Lock     *LockState   `json:"lock,omitempty"`
 	Git      GitState     `json:"git"`
 	GitHub   GitHubState  `json:"github"`
 	Agent    AgentState   `json:"agent"`
@@ -70,9 +75,15 @@ type Worktree struct {
 type GitState struct {
 	Clean       bool   `json:"clean"`
 	StatusError string `json:"status_error,omitempty"`
-	Ahead       *int   `json:"ahead,omitempty"`
-	Behind      *int   `json:"behind,omitempty"`
-	LastCommit  string `json:"last_commit_at,omitempty"`
+	// Uncommitted is the number of changed or untracked files.
+	Uncommitted int `json:"uncommitted"`
+	// Unpushed is the number of commits in HEAD that no remote branch
+	// contains (commits up to a merged PR's head count as pushed). nil when
+	// it cannot be determined.
+	Unpushed   *int   `json:"unpushed,omitempty"`
+	Ahead      *int   `json:"ahead,omitempty"`
+	Behind     *int   `json:"behind,omitempty"`
+	LastCommit string `json:"last_commit_at,omitempty"`
 }
 
 type GitHubState struct {
@@ -89,6 +100,7 @@ type PullRequest struct {
 	MergedAt   string `json:"merged_at,omitempty"`
 	URL        string `json:"url"`
 	HeadBranch string `json:"head_branch"`
+	HeadOID    string `json:"head_oid,omitempty"`
 }
 
 type ghPullRequest struct {
@@ -98,6 +110,7 @@ type ghPullRequest struct {
 	MergedAt   string `json:"mergedAt"`
 	URL        string `json:"url"`
 	HeadBranch string `json:"headRefName"`
+	HeadOID    string `json:"headRefOid"`
 }
 
 type AgentState struct {
@@ -122,15 +135,6 @@ type ResultError struct {
 	Source  string `json:"source"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
-}
-
-type CleanupReport struct {
-	SchemaVersion int           `json:"schema_version"`
-	Repository    Repository    `json:"repository"`
-	Mode          string        `json:"mode"`
-	Candidates    []Worktree    `json:"candidates,omitempty"`
-	Removed       []string      `json:"removed,omitempty"`
-	Errors        []ResultError `json:"errors,omitempty"`
 }
 
 type worktreeRecord struct {
@@ -196,6 +200,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInspect(args[1:], stdout, stderr)
 	case "refresh":
 		return runRefresh(args[1:], stdout, stderr)
+	case "new":
+		return runNew(args[1:], stdout, stderr)
+	case "lock":
+		return runLock(args[1:], stdout, stderr)
+	case "unlock":
+		return runUnlock(args[1:], stdout, stderr)
 	case "clean":
 		return runClean(args[1:], stdout, stderr)
 	case "guide":
@@ -292,90 +302,6 @@ func runRefresh(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runClean(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("clean", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dryRun := fs.Bool("dry-run", false, "show recommended cleanup without removing worktrees")
-	jsonOutput := fs.Bool("json", false, "output JSON")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "gw clean: unexpected arguments")
-		return 2
-	}
-
-	result, err := collectResult(true)
-	if err != nil {
-		return printCommandError(stderr, err)
-	}
-	candidates := make([]Worktree, 0)
-	for _, wt := range result.Worktrees {
-		if wt.Cleanup.Recommendation == "recommended" && wt.Path != result.Repository.Path {
-			candidates = append(candidates, wt)
-		}
-	}
-	if *dryRun {
-		if *jsonOutput {
-			return writeJSON(stdout, CleanupReport{
-				SchemaVersion: schemaVersion,
-				Repository:    result.Repository,
-				Mode:          "dry-run",
-				Candidates:    candidates,
-				Errors:        result.Errors,
-			})
-		}
-		for _, wt := range candidates {
-			fmt.Fprintf(stdout, "[recommended] %s\n", displayPath(result.Repository.Path, wt.Path))
-			for _, reason := range wt.Cleanup.Reasons {
-				fmt.Fprintf(stdout, "  - %s\n", reason)
-			}
-		}
-		if len(candidates) == 0 {
-			fmt.Fprintln(stdout, "No recommended worktrees to remove.")
-		}
-		return 0
-	}
-
-	removed := make([]string, 0, len(candidates))
-	cleanupErrors := append([]ResultError{}, result.Errors...)
-	for _, wt := range candidates {
-		if err := removeWorktree(result.Repository.Path, wt.Path); err != nil {
-			fmt.Fprintf(stderr, "gw clean: cannot remove %s: %v\n", displayPath(result.Repository.Path, wt.Path), err)
-			cleanupErrors = append(cleanupErrors, ResultError{Source: "git", Code: "worktree_remove_failed", Message: fmt.Sprintf("%s: %v", wt.Path, err)})
-			continue
-		}
-		removed = append(removed, wt.Path)
-		if !*jsonOutput {
-			fmt.Fprintf(stdout, "removed %s\n", displayPath(result.Repository.Path, wt.Path))
-		}
-	}
-	if *jsonOutput {
-		code := writeJSON(stdout, CleanupReport{
-			SchemaVersion: schemaVersion,
-			Repository:    result.Repository,
-			Mode:          "apply",
-			Candidates:    candidates,
-			Removed:       removed,
-			Errors:        cleanupErrors,
-		})
-		if code != 0 {
-			return code
-		}
-		if len(cleanupErrors) > 0 {
-			return 1
-		}
-		return 0
-	}
-	if len(removed) == 0 && len(candidates) == 0 {
-		fmt.Fprintln(stdout, "No recommended worktrees to remove.")
-	}
-	if len(cleanupErrors) > 0 {
-		return 1
-	}
-	return 0
-}
-
 func runGuide(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printGuideOverview(stdout)
@@ -383,7 +309,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "list", "inspect", "refresh", "clean", "json":
+	case "list", "inspect", "refresh", "new", "lock", "clean", "json":
 		printGuideTopic(stdout, args[0])
 		return 0
 	case "agent-hook":
@@ -395,7 +321,7 @@ func runGuide(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "gw guide: unknown topic %q\n", args[0])
-		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, clean, json, agent-hook claude|codex")
+		fmt.Fprintln(stderr, "available topics: list, inspect, refresh, new, lock, clean, json, agent-hook claude|codex")
 		return 2
 	}
 }
@@ -429,6 +355,13 @@ func runAgentEvent(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		lifecycle = "ended"
 	default:
 		return printCommandError(stderr, fmt.Errorf("unsupported hook event %q", event.Event))
+	}
+	// A session started by an external tool is protected by gw lock, which the
+	// tool controls, rather than by hooks that may not fire. Keep the record
+	// for the session/worktree link, but do not let it mark the worktree as
+	// running or finished.
+	if managedSession() {
+		lifecycle = "managed"
 	}
 
 	path, err := statePath("sessions.json")
@@ -467,6 +400,16 @@ func runAgentEvent(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	return 0
 }
 
+// managedSession reports whether GW_MANAGED marks the agent as started by an
+// external tool. Empty, "0", and "false" mean not managed.
+func managedSession() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GW_MANAGED"))) {
+	case "", "0", "false":
+		return false
+	}
+	return true
+}
+
 func collectResult(forceGitHubRefresh bool) (Result, error) {
 	repoPath, err := gitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
@@ -486,6 +429,9 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 		SchemaVersion: schemaVersion,
 		Repository:    Repository{Path: repoPath, Branch: branch},
 		Sources:       Sources{GitHub: "unavailable", Agent: "unavailable"},
+	}
+	if len(records) > 0 {
+		result.mainPath = records[0].Path
 	}
 	githubStates, githubSource, githubErr := collectGitHubStates(repoPath, records, forceGitHubRefresh)
 	result.Sources.GitHub = githubSource
@@ -515,7 +461,8 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 				Head:     record.Head,
 				Detached: record.Detached,
 				Locked:   record.Locked,
-				Git:      collectGitState(record),
+				Lock:     lockStateFor(record.Path),
+				Git:      collectGitState(record, mergedPRHead(githubStates[record.Branch])),
 				GitHub:   githubStates[record.Branch],
 				Agent:    agentForPath(record.Path, sessions),
 			}
@@ -567,7 +514,7 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 			continue
 		}
 		if !forceRefresh {
-			if entry, ok := cache.Entries[record.Branch]; ok && now.Sub(entry.FetchedAt) >= 0 && now.Sub(entry.FetchedAt) < githubCacheTTL {
+			if entry, ok := cache.Entries[record.Branch]; ok && now.Sub(entry.FetchedAt) >= 0 && now.Sub(entry.FetchedAt) < githubCacheTTL && !missingMergedHead(entry.State) {
 				states[record.Branch] = normalizeGitHubState(entry.State)
 				usedCache = true
 				continue
@@ -637,10 +584,16 @@ func collectGitHubStates(repoPath string, records []worktreeRecord, forceRefresh
 	return states, source, firstErr
 }
 
+// missingMergedHead reports a merged PR cached before gw recorded PR head
+// commits; it is fetched again because the unpushed-commit check needs it.
+func missingMergedHead(state GitHubState) bool {
+	return state.PR != nil && strings.EqualFold(state.PR.State, "MERGED") && state.PR.HeadOID == ""
+}
+
 func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--state", "all", "--head", branch, "--limit", "10", "--json", "number,title,state,mergedAt,url,headRefName")
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--state", "all", "--head", branch, "--limit", "10", "--json", "number,title,state,mergedAt,url,headRefName,headRefOid")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -675,6 +628,7 @@ func githubPRForBranch(repoPath, branch string) (GitHubState, error) {
 		MergedAt:   selected.MergedAt,
 		URL:        selected.URL,
 		HeadBranch: selected.HeadBranch,
+		HeadOID:    selected.HeadOID,
 	}, Status: githubStatusFound}, nil
 }
 
@@ -716,8 +670,14 @@ func parseWorktreeList(out string) ([]worktreeRecord, error) {
 		}
 		key, value, ok := strings.Cut(line, " ")
 		if !ok {
-			if line == "detached" && current != nil {
-				current.Detached = true
+			if current != nil {
+				switch line {
+				case "detached":
+					current.Detached = true
+				case "locked":
+					// git prints a bare "locked" when no reason was given.
+					current.Locked = true
+				}
 			}
 			continue
 		}
@@ -742,7 +702,15 @@ func parseWorktreeList(out string) ([]worktreeRecord, error) {
 	return records, nil
 }
 
-func collectGitState(record worktreeRecord) GitState {
+// mergedPRHead returns the head commit of a merged PR, or "".
+func mergedPRHead(state GitHubState) string {
+	if state.PR != nil && strings.EqualFold(state.PR.State, "MERGED") {
+		return state.PR.HeadOID
+	}
+	return ""
+}
+
+func collectGitState(record worktreeRecord, mergedHead string) GitState {
 	state := GitState{Clean: true}
 	out, err := gitOutputFrom(record.Path, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
@@ -751,6 +719,10 @@ func collectGitState(record worktreeRecord) GitState {
 		return state
 	}
 	state.Clean = strings.TrimSpace(out) == ""
+	if !state.Clean {
+		state.Uncommitted = len(strings.Split(strings.TrimRight(out, "\n"), "\n"))
+	}
+	state.Unpushed = unpushedCommits(record.Path, mergedHead)
 	if timestamp, err := gitOutputFrom(record.Path, "log", "-1", "--format=%cI"); err == nil {
 		state.LastCommit = strings.TrimSpace(timestamp)
 	}
@@ -764,12 +736,33 @@ func collectGitState(record worktreeRecord) GitState {
 	return state
 }
 
+// unpushedCommits counts commits in HEAD that no remote-tracking branch
+// contains. After a squash merge the remote branch is often deleted, so the
+// merged PR's head commit (when known locally) also counts as pushed.
+func unpushedCommits(worktreePath, mergedHead string) *int {
+	args := []string{"rev-list", "--count", "HEAD", "--not", "--remotes"}
+	if mergedHead != "" {
+		if _, err := gitOutputFrom(worktreePath, "cat-file", "-e", mergedHead+"^{commit}"); err == nil {
+			args = append(args, mergedHead)
+		}
+	}
+	out, err := gitOutputFrom(worktreePath, args...)
+	if err != nil {
+		return nil
+	}
+	count := parseInt(strings.TrimSpace(out))
+	return &count
+}
+
 func cleanupFor(wt Worktree, isRepository bool) CleanupState {
 	if isRepository {
 		return CleanupState{Recommendation: "keep", Reasons: []string{"main_worktree"}}
 	}
 	if wt.Locked {
 		return CleanupState{Recommendation: "keep", Reasons: []string{"worktree_locked"}}
+	}
+	if wt.Lock != nil && wt.Lock.Alive {
+		return CleanupState{Recommendation: "keep", Reasons: []string{"agent_process_running"}}
 	}
 	if !wt.Git.Clean {
 		return CleanupState{Recommendation: "review", Reasons: []string{"worktree_dirty"}}
@@ -792,14 +785,24 @@ func cleanupFor(wt Worktree, isRepository bool) CleanupState {
 	if wt.GitHub.PR == nil {
 		return CleanupState{Recommendation: "review", Reasons: []string{"no_pull_request"}}
 	}
+	var prReason string
 	switch strings.ToUpper(wt.GitHub.PR.State) {
 	case "MERGED":
-		return CleanupState{Recommendation: "recommended", Reasons: []string{"pull_request_merged", "worktree_clean"}}
+		prReason = "pull_request_merged"
 	case "CLOSED":
-		return CleanupState{Recommendation: "recommended", Reasons: []string{"pull_request_closed", "worktree_clean"}}
+		prReason = "pull_request_closed"
 	default:
 		return CleanupState{Recommendation: "review", Reasons: []string{"pull_request_open"}}
 	}
+	// gw clean deletes the branch with the worktree, so commits that exist
+	// only in this branch would be lost.
+	if wt.Git.Unpushed == nil {
+		return CleanupState{Recommendation: "review", Reasons: []string{"unpushed_unknown"}}
+	}
+	if *wt.Git.Unpushed > 0 {
+		return CleanupState{Recommendation: "review", Reasons: []string{"unpushed_commits"}}
+	}
+	return CleanupState{Recommendation: "recommended", Reasons: []string{prReason, "worktree_clean"}}
 }
 
 func agentForPath(path string, sessions []sessionRecord) AgentState {
@@ -1036,7 +1039,11 @@ func gitOutputFrom(dir string, args ...string) (string, error) {
 }
 
 func gitRun(dir string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	return gitRunTimeout(dir, execTimeout, args...)
+}
+
+func gitRunTimeout(dir string, timeout time.Duration, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
@@ -1045,7 +1052,7 @@ func gitRun(dir string, args ...string) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), execTimeout)
+			return fmt.Errorf("git %s timed out after %s", strings.Join(args, " "), timeout)
 		}
 		if message := strings.TrimSpace(stderr.String()); message != "" {
 			return errors.New(message)
@@ -1056,7 +1063,18 @@ func gitRun(dir string, args ...string) error {
 }
 
 func removeWorktree(repoPath, worktreePath string) error {
-	removeErr := gitRun(repoPath, "worktree", "remove", "--force", worktreePath)
+	return removeWorktreeWith(repoPath, worktreePath, false)
+}
+
+// removeWorktreeWith removes a worktree with git worktree remove --force,
+// passing --force twice when unlockGit is set so a git-locked worktree is
+// removed too.
+func removeWorktreeWith(repoPath, worktreePath string, unlockGit bool) error {
+	args := []string{"worktree", "remove", "--force"}
+	if unlockGit {
+		args = append(args, "--force")
+	}
+	removeErr := gitRun(repoPath, append(args, worktreePath)...)
 	verifyErr := verifyWorktreeRemoved(repoPath, worktreePath)
 	if removeErr != nil {
 		if verifyErr != nil {
@@ -1064,7 +1082,15 @@ func removeWorktree(repoPath, worktreePath string) error {
 		}
 		return removeErr
 	}
-	return verifyErr
+	if verifyErr != nil {
+		return verifyErr
+	}
+	// Worktrees made by gw new live in <root>/<repo>/<name>; drop the <repo>
+	// directory once its last worktree is gone.
+	if root, err := worktreeRoot(""); err == nil {
+		removeEmptyRepoDir(root, worktreePath)
+	}
+	return nil
 }
 
 func verifyWorktreeRemoved(repoPath, worktreePath string) error {
@@ -1122,7 +1148,10 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  list       worktreeの状態を一覧表示")
 	fmt.Fprintln(w, "  inspect    worktreeの詳細と判定理由を表示")
 	fmt.Fprintln(w, "  refresh    Git/GitHubの状態を更新")
-	fmt.Fprintln(w, "  clean      cleanup推奨対象を削除")
+	fmt.Fprintln(w, "  new        worktreeを作成")
+	fmt.Fprintln(w, "  lock       worktreeでプロセスが実行中であることを宣言")
+	fmt.Fprintln(w, "  unlock     gw lockを解除")
+	fmt.Fprintln(w, "  clean      cleanup推奨対象、または指定したworktreeを削除")
 	fmt.Fprintln(w, "  guide      AI向けに各サブコマンドの使い方や連携方法を説明")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "AI agents: run 'gw guide' for command usage and integration guidance.")
@@ -1147,6 +1176,13 @@ func printInspect(w io.Writer, repoPath string, wt Worktree) {
 	fmt.Fprintf(w, "HEAD: %s\n", wt.Head)
 	fmt.Fprintf(w, "Git: %s\n", gitStatus(wt))
 	fmt.Fprintf(w, "Agent: %s\n", agentStatus(wt.Agent))
+	if wt.Lock != nil {
+		state := "stale"
+		if wt.Lock.Alive {
+			state = "running"
+		}
+		fmt.Fprintf(w, "Lock: pid %d (%s)\n", wt.Lock.PID, state)
+	}
 	fmt.Fprintf(w, "Cleanup: %s\n", wt.Cleanup.Recommendation)
 	if len(wt.Cleanup.Reasons) > 0 {
 		fmt.Fprintln(w, "Reasons:")
@@ -1165,13 +1201,19 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw list [--json]")
 	fmt.Fprintln(w, "- gw inspect <worktree> [--json]")
 	fmt.Fprintln(w, "- gw refresh [--json]")
+	fmt.Fprintln(w, "- gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
+	fmt.Fprintln(w, "- gw lock <worktree> --pid <pid>")
+	fmt.Fprintln(w, "- gw unlock <worktree>")
 	fmt.Fprintln(w, "- gw clean --dry-run [--json]")
-	fmt.Fprintln(w, "- gw clean")
+	fmt.Fprintln(w, "- gw clean [--save-branch]")
+	fmt.Fprintln(w, "- gw clean <worktree>... [--force [--force]] [--save-branch] [--dry-run] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "## Guide topics")
 	fmt.Fprintln(w, "- gw guide list")
 	fmt.Fprintln(w, "- gw guide inspect")
 	fmt.Fprintln(w, "- gw guide refresh")
+	fmt.Fprintln(w, "- gw guide new")
+	fmt.Fprintln(w, "- gw guide lock")
 	fmt.Fprintln(w, "- gw guide clean")
 	fmt.Fprintln(w, "- gw guide json")
 	fmt.Fprintln(w, "- gw guide agent-hook claude|codex")
@@ -1207,40 +1249,108 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
-	case "clean":
-		fmt.Fprintln(w, "# gw clean")
+	case "new":
+		fmt.Fprintln(w, "# gw new <name>")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "cleanup判定がrecommendedのworktreeにgit worktree remove --forceを実行します。ignoredなビルド生成物も削除対象です。dirty、現在のworktree、activeなagent sessionは削除しません。ブランチは削除しません。")
+		fmt.Fprintln(w, "現在のリポジトリに、<name>と同名の新規ブランチでworktreeを作成し、パスだけを出力します。作成前にベースのリモートをfetchします（失敗した場合は警告してローカルのrefを使います）。")
+		fmt.Fprintln(w, "配置先は <root>/<repo>/<name> です。<repo>はメインworktreeのディレクトリ名、<root>は --root、GW_WORKTREE_ROOT、${XDG_DATA_HOME:-~/.local/share}/gw/worktrees の順に決まります。")
+		fmt.Fprintln(w, "新しいブランチはベースを追跡しません（最初のpushで自分のupstreamを設定してください）。")
+		fmt.Fprintln(w, "同じ配置先に同じブランチのworktreeが既にあれば、作り直さずにそのパスを返します（created: false）。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
-		fmt.Fprintln(w, "  --dry-run    削除は行わず、削除候補と理由だけを表示")
-		fmt.Fprintln(w, "  --json       CleanupReport（schema_version、repository、mode、candidates、removed、errors）を出力")
-		fmt.Fprintln(w, "GitHub PR情報は常に再取得してからcleanup判定を行います。")
+		fmt.Fprintln(w, "  --base <ref>       ブランチの起点（既定: origin/main）")
+		fmt.Fprintln(w, "  --branch <branch>  ブランチ名（既定: <name>）")
+		fmt.Fprintln(w, "  --root <dir>       配置先のルート（既定: GW_WORKTREE_ROOT、なければ ${XDG_DATA_HOME:-~/.local/share}/gw/worktrees）")
+		fmt.Fprintln(w, "  --json             schema_version、path、branch、base、created を出力（既存のworktreeを返した場合baseは省略）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<name>には / や \\ や .. を含められません。")
+		fmt.Fprintln(w, "終了コード:")
+		fmt.Fprintln(w, "  0  作成した、または既存のworktreeを返した")
+		fmt.Fprintln(w, "  1  その他のエラー（Gitリポジトリ外、git worktree addの失敗など）")
+		fmt.Fprintln(w, "  2  引数の誤り")
+		fmt.Fprintln(w, "  3  名前またはブランチ名が不正")
+		fmt.Fprintln(w, "  4  ベースが見つからない")
+		fmt.Fprintln(w, "  5  ブランチが既に存在する、または別のworktreeでチェックアウト中")
+		fmt.Fprintln(w, "  6  配置先が既に存在する（別ブランチのworktree、worktreeでないディレクトリなど）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "gw cleanでこの配置先のworktreeを削除し、<repo>ディレクトリが空になった場合は<repo>ディレクトリも削除します。")
+	case "lock":
+		fmt.Fprintln(w, "# gw lock <worktree> --pid <pid> / gw unlock <worktree>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "外部ツールがエージェントのCLIを起動するときに、そのプロセスがworktreeで実行中であることを宣言します。単位はセッションではなくプロセス（CLIの1回の起動）です。")
+		fmt.Fprintln(w, "生きているプロセスのlockがあるworktreeはcleanup判定がkeep（理由 agent_process_running）になり、gw cleanで削除されません。")
+		fmt.Fprintln(w, "gwは判定のたびにPIDの生存を確認します。プロセスが終了していれば古いlockとして扱い、保護しません（呼び出し側が落ちてもlockは残り続けません）。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<worktree>はパス、ブランチ名、ディレクトリ名のいずれかで指定します。")
+		fmt.Fprintln(w, "lock: --pid（必須）のプロセスが存在しない場合、または別の生きているプロセスがlock中の場合は終了コード1で失敗します。同じPIDでの再実行と、古いlockの上書きは成功します。")
+		fmt.Fprintln(w, "unlock: lockを削除します。lockがなくても成功します。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "外部ツールからの使い方:")
+		fmt.Fprintln(w, "  1. gw new <name> でworktreeを作成")
+		fmt.Fprintln(w, "  2. 環境変数 GW_MANAGED=1 を付けてエージェントのCLIを起動し、gw lock <worktree> --pid <CLIのPID>")
+		fmt.Fprintln(w, "  3. CLIの終了後に gw unlock <worktree>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "GW_MANAGEDが付いたエージェントのhook（gw agent-event）は、セッションとworktreeの紐付けを記録しますが、lifecycleをactive/endedではなくmanagedにします。managedは実行中として扱わず、実行中の判定はlockだけで行います。")
+		fmt.Fprintln(w, "PIDは再利用されることがあるため、CLIの終了後は速やかにunlockしてください。")
+	case "clean":
+		fmt.Fprintln(w, "# gw clean [<worktree>...]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "引数なし: cleanup判定がrecommendedのworktreeをすべて削除します。")
+		fmt.Fprintln(w, "<worktree>を指定: 指定したworktreeだけを対象にし、判定に合わないものは削除せず理由を返します。<worktree>はパス、ブランチ名、ディレクトリ名のいずれかで指定します。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "worktreeはgit worktree remove --forceで削除します（ignoredなビルド生成物も削除対象）。")
+		fmt.Fprintln(w, "既定でローカルブランチもworktreeと一緒に削除します（git branch -D）。削除したブランチの先頭コミットIDを出力するので、git branch <branch> <commit> で戻せます。")
+		fmt.Fprintln(w, "メインworktreeと現在のworktreeは、どの指定でも削除しません。")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  --force          指定したworktreeを、判定（dirty、未push、PRなし/open、GitHub状態不明など）を無視して削除。未コミットの変更と未pushのコミットは失われます")
+		fmt.Fprintln(w, "  --force --force  さらに、実行中（生きたgw lock、hookのactive）とgit worktree lockも無視して削除（git worktree remove -f -f と同じ考え方）")
+		fmt.Fprintln(w, "  --save-branch    worktreeだけ削除し、ブランチは残す（--forceの有無に関係なく残る）")
+		fmt.Fprintln(w, "  --dry-run        削除は行わず、削除予定と失われるもの（未コミットのファイル数、未pushのコミット数、PRの状態）を表示")
+		fmt.Fprintln(w, "  --json           CleanupReport（schema_version、repository、mode、candidates、planned、removed、skipped、errors）を出力")
+		fmt.Fprintln(w, "--forceは<worktree>の指定が必要です。GitHub PR情報は常に再取得してからcleanup判定を行います。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "判定基準:")
-		fmt.Fprintln(w, "  recommended  pull requestがMERGED/CLOSED、worktreeがclean、activeなagentがない")
-		fmt.Fprintln(w, "  review       dirty、pull requestがない/open、GitHubの状態が不明などで自動削除しない")
-		fmt.Fprintln(w, "  keep         main worktree、ロック済み、activeなagentがある")
+		fmt.Fprintln(w, "  recommended  pull requestがMERGED/CLOSED、worktreeがclean、未pushのコミットがない、実行中でない")
+		fmt.Fprintln(w, "  review       dirty、未pushのコミットがある、pull requestがない/open、GitHubの状態が不明などで自動削除しない")
+		fmt.Fprintln(w, "  keep         main/現在のworktree、git worktree lock済み、gw lockのプロセスが実行中、activeなagentがある")
+		fmt.Fprintln(w, "未pushのコミットは、どのリモートブランチにも含まれないコミットです。PRがMERGEDなら、PRの先頭コミットまではpush済みとして扱います。")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "最初に gw clean --dry-run を実行して削除候補を確認することを推奨します。")
-		fmt.Fprintln(w, "削除に失敗した場合はGitの具体的なエラー理由を表示し、終了コード1を返します。")
+		fmt.Fprintln(w, "指定したworktreeの扱い:")
+		fmt.Fprintln(w, "  状態                         なし  --force  --force --force")
+		fmt.Fprintln(w, "  recommended                  削除  削除     削除")
+		fmt.Fprintln(w, "  review（dirty、未pushなど）  残す  削除     削除")
+		fmt.Fprintln(w, "  実行中・lock                 残す  残す     削除")
+		fmt.Fprintln(w, "  main/現在のworktree          残す  残す     残す")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "JSON:")
+		fmt.Fprintln(w, "  planned、removed、skippedの要素は path、branch、commit、delete_branch、forced、reasons、uncommitted、unpushed、pr_state を持ちます。")
+		fmt.Fprintln(w, "  planned  dry-runで削除する予定のもの")
+		fmt.Fprintln(w, "  removed  削除したもの（delete_branchはブランチも削除したか）")
+		fmt.Fprintln(w, "  skipped  指定したが削除しなかったもの（reasonsが理由）")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "最初に gw clean --dry-run を実行して削除予定を確認することを推奨します。")
+		fmt.Fprintln(w, "一部が失敗しても残りの指定は続けます。削除やブランチ削除に失敗した場合、または指定したworktreeが見つからない場合は終了コード1を返します。判定で残したもの（skipped）は失敗として扱いません。")
 	case "json":
 		fmt.Fprintln(w, "# gw JSON output")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "list、inspect、refreshは次のトップレベル構造で出力します。")
 		fmt.Fprintln(w, "  schema_version, repository, worktrees, sources, errors")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、lockedに加えて次の状態を含みます。")
-		fmt.Fprintln(w, "  git      clean/dirty、upstreamとの差分、最終コミット時刻")
-		fmt.Fprintln(w, "  github   pull requestと取得状態")
+		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、locked（git worktree lock）に加えて次の状態を含みます。")
+		fmt.Fprintln(w, "  lock     gw lockがある場合だけ出力。pid、locked_at、alive（プロセスが生きているか）")
+		fmt.Fprintln(w, "  git      clean/dirty、未コミットのファイル数（uncommitted）、未pushのコミット数（unpushed）、upstreamとの差分、最終コミット時刻")
+		fmt.Fprintln(w, "  github   pull request（先頭コミット head_oid を含む）と取得状態")
 		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
 		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
 		fmt.Fprintln(w)
+		fmt.Fprintln(w, "agent.lifecycleはactive、ended、managed（GW_MANAGED付きで起動され、gw lockで判定するもの）、unknownのいずれかです。")
 		fmt.Fprintln(w, "worktrees[].github.statusはPR検索結果（found、not_found、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "sources.githubはGitHub PR情報の取得元（gh、cache、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "取得できない値はnullまたはunknown/unavailableで表現し、推測しません。")
-		fmt.Fprintln(w, "statusの意味を変更したため、schema_versionは2です。")
-		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、removed、errorsを含みます（詳細は gw guide clean）。")
+		fmt.Fprintln(w, "schema_versionは3です。2からの変更: worktreeにlock、git.uncommitted、git.unpushed、github.pr.head_oidを追加、agent.lifecycleにmanagedを追加、cleanupの判定に未pushのコミットを追加、clean --jsonのremovedをパスの配列からオブジェクトの配列に変更。")
+		fmt.Fprintln(w, "gw new --jsonの結果はschema_version、path、branch、base、createdを含みます（詳細は gw guide new）。")
+		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、planned、removed、skipped、errorsを含みます（詳細は gw guide clean）。")
 	}
 }
 
@@ -1260,6 +1370,7 @@ func printAgentHookGuide(w io.Writer, provider string) {
 		fmt.Fprintln(w, "設定場所: ~/.codex/hooks.json、~/.codex/config.toml、またはプロジェクトの .codex/hooks.json / config.toml")
 	}
 	fmt.Fprintln(w, "hookはstdinのJSONをgwの状態ファイルへ保存し、stdoutには何も出力しません。")
+	fmt.Fprintln(w, "外部ツールが環境変数 GW_MANAGED=1 を付けて起動した場合、lifecycleはmanagedになり、実行中の判定は gw lock で行います（詳細は gw guide lock）。")
 	fmt.Fprintln(w, "動作確認: gw list --json または gw inspect <worktree> --json")
 }
 
