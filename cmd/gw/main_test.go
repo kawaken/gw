@@ -635,3 +635,162 @@ func TestCleanupForGitHubStatuses(t *testing.T) {
 		})
 	}
 }
+
+// newTestRepo creates a repository whose main branch is pushed to a bare
+// "origin", so origin/main exists like in a normal clone.
+func newTestRepo(t *testing.T) string {
+	t.Helper()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	gitTestCommand(t, filepath.Dir(origin), "init", "--quiet", "--bare", origin)
+	repoPath := filepath.Join(t.TempDir(), "myrepo")
+	if err := os.Mkdir(repoPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "init", "--quiet", "-b", "main")
+	gitTestCommand(t, repoPath, "config", "user.email", "test@example.com")
+	gitTestCommand(t, repoPath, "config", "user.name", "Test User")
+	gitTestCommand(t, repoPath, "config", "commit.gpgsign", "false")
+	gitTestCommand(t, repoPath, "config", "core.fsmonitor", "false")
+	if err := os.WriteFile(filepath.Join(repoPath, "file.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "add", "file.txt")
+	gitTestCommand(t, repoPath, "commit", "--quiet", "-m", "initial")
+	gitTestCommand(t, repoPath, "remote", "add", "origin", origin)
+	gitTestCommand(t, repoPath, "push", "--quiet", "origin", "main")
+	return repoPath
+}
+
+func runGW(t *testing.T, args ...string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := run(args, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestRunNewCreatesWorktreeUnderRoot(t *testing.T) {
+	repoPath := newTestRepo(t)
+	root := t.TempDir()
+	t.Setenv("GW_WORKTREE_ROOT", root)
+	t.Chdir(repoPath)
+
+	code, stdout, stderr := runGW(t, "new", "fix-a")
+	if code != 0 {
+		t.Fatalf("gw new returned %d: %s", code, stderr)
+	}
+	want := resolvePath(filepath.Join(root, "myrepo", "fix-a"))
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+	records, err := gitWorktrees(repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, record := range records {
+		if record.Path == want && record.Branch == "fix-a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("worktree %s on branch fix-a not registered: %+v", want, records)
+	}
+	if _, err := gitOutputFrom(want, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
+		t.Fatal("new branch tracks the base; want no upstream")
+	}
+
+	// A second call with the same name returns the existing worktree.
+	code, stdout, stderr = runGW(t, "new", "fix-a", "--json")
+	if code != 0 {
+		t.Fatalf("second gw new returned %d: %s", code, stderr)
+	}
+	var result NewResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if result.Created || result.Path != want || result.Branch != "fix-a" || result.SchemaVersion != schemaVersion {
+		t.Fatalf("second gw new result = %+v", result)
+	}
+
+	// Removing the last worktree also removes the empty <repo> directory.
+	if err := removeWorktree(repoPath, want); err != nil {
+		t.Fatalf("removeWorktree returned error: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Dir(want)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("repo directory still exists, err = %v", err)
+	}
+}
+
+func TestRunNewJSONWithBranchAndBase(t *testing.T) {
+	repoPath := newTestRepo(t)
+	root := t.TempDir()
+	t.Chdir(repoPath)
+
+	code, stdout, stderr := runGW(t, "new", "--root", root, "--branch", "feature/x", "--base", "main", "task-1", "--json")
+	if code != 0 {
+		t.Fatalf("gw new returned %d: %s", code, stderr)
+	}
+	var result NewResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	want := NewResult{SchemaVersion: schemaVersion, Path: resolvePath(filepath.Join(root, "myrepo", "task-1")), Branch: "feature/x", Base: "main", Created: true}
+	if result != want {
+		t.Fatalf("result = %+v, want %+v", result, want)
+	}
+}
+
+func TestRunNewDefaultRootUsesXDGDataHome(t *testing.T) {
+	repoPath := newTestRepo(t)
+	dataHome := t.TempDir()
+	t.Setenv("GW_WORKTREE_ROOT", "")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Chdir(repoPath)
+
+	code, stdout, stderr := runGW(t, "new", "fix-b")
+	if code != 0 {
+		t.Fatalf("gw new returned %d: %s", code, stderr)
+	}
+	want := resolvePath(filepath.Join(dataHome, "gw", "worktrees", "myrepo", "fix-b"))
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunNewFailures(t *testing.T) {
+	repoPath := newTestRepo(t)
+	root := t.TempDir()
+	t.Setenv("GW_WORKTREE_ROOT", root)
+	t.Chdir(repoPath)
+	gitTestCommand(t, repoPath, "branch", "existing")
+	if code, _, stderr := runGW(t, "new", "taken"); code != 0 {
+		t.Fatalf("setup gw new returned %d: %s", code, stderr)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "myrepo", "occupied"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "no name", args: []string{"new"}, code: 2},
+		{name: "slash", args: []string{"new", "a/b"}, code: exitNewInvalidName},
+		{name: "dot dot", args: []string{"new", "a..b"}, code: exitNewInvalidName},
+		{name: "invalid branch", args: []string{"new", "ok", "--branch", "bad branch"}, code: exitNewInvalidName},
+		{name: "missing base", args: []string{"new", "fresh", "--base", "origin/nope"}, code: exitNewBaseNotFound},
+		{name: "existing branch", args: []string{"new", "existing"}, code: exitNewBranchConflict},
+		{name: "branch checked out elsewhere", args: []string{"new", "other", "--branch", "taken"}, code: exitNewBranchConflict},
+		{name: "same path, other branch", args: []string{"new", "taken", "--branch", "different"}, code: exitNewPathConflict},
+		{name: "path exists", args: []string{"new", "occupied"}, code: exitNewPathConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, _, stderr := runGW(t, tt.args...)
+			if code != tt.code {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, tt.code, stderr)
+			}
+		})
+	}
+}
