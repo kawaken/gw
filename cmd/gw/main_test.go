@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -792,5 +793,211 @@ func TestRunNewFailures(t *testing.T) {
 				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, tt.code, stderr)
 			}
 		})
+	}
+}
+
+func TestRunAgentEventManaged(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{value: "1", want: "managed"},
+		{value: "true", want: "managed"},
+		{value: "0", want: "active"},
+		{value: "", want: "active"},
+	}
+	for _, tt := range tests {
+		t.Run("GW_MANAGED="+tt.value, func(t *testing.T) {
+			stateHome := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", stateHome)
+			t.Setenv("GW_MANAGED", tt.value)
+			input := strings.NewReader(`{"session_id":"session-1","cwd":"/tmp/worktree","hook_event_name":"SessionStart"}`)
+			var stderr bytes.Buffer
+			if code := runAgentEvent([]string{"--provider", "codex"}, input, io.Discard, &stderr); code != 0 {
+				t.Fatalf("runAgentEvent returned %d: %s", code, stderr.String())
+			}
+			store, err := readSessionStore(filepath.Join(stateHome, "gw", "sessions.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := store.Sessions[0]
+			if got.Lifecycle != tt.want || got.SessionID != "session-1" || got.CWD != "/tmp/worktree" || got.Event != "SessionStart" {
+				t.Fatalf("stored session = %+v, want lifecycle %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCleanupForManagedAndLock(t *testing.T) {
+	merged := Worktree{
+		Git:    GitState{Clean: true},
+		Agent:  AgentState{Lifecycle: "managed"},
+		GitHub: GitHubState{Status: githubStatusFound, PR: &PullRequest{State: "MERGED"}},
+	}
+	if got := cleanupFor(merged, false); got.Recommendation != "recommended" {
+		t.Fatalf("managed lifecycle recommendation = %+v, want recommended", got)
+	}
+
+	locked := merged
+	locked.Lock = &LockState{PID: 123, Alive: true}
+	if got := cleanupFor(locked, false); got.Recommendation != "keep" || got.Reasons[0] != "agent_process_running" {
+		t.Fatalf("live lock cleanup = %+v, want keep/agent_process_running", got)
+	}
+	locked.Git.Clean = false
+	if got := cleanupFor(locked, false); got.Recommendation != "keep" {
+		t.Fatalf("live lock on dirty worktree cleanup = %+v, want keep", got)
+	}
+
+	stale := merged
+	stale.Lock = &LockState{PID: 123, Alive: false}
+	if got := cleanupFor(stale, false); got.Recommendation != "recommended" {
+		t.Fatalf("stale lock cleanup = %+v, want recommended", got)
+	}
+}
+
+// deadPID returns the PID of a child process that has exited and been reaped.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Skipf("cannot run true: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+// runningPID starts a child process that stays alive until the test ends.
+func runningPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot run sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+func TestPIDAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX commands")
+	}
+	if !pidAlive(os.Getpid()) {
+		t.Fatal("current process reported as not running")
+	}
+	if pidAlive(deadPID(t)) {
+		t.Fatal("exited process reported as running")
+	}
+	if pidAlive(0) || pidAlive(-1) {
+		t.Fatal("invalid PID reported as running")
+	}
+}
+
+func TestRunLockAndUnlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX commands")
+	}
+	repoPath := newTestRepo(t)
+	t.Setenv("GW_WORKTREE_ROOT", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Chdir(repoPath)
+	code, stdout, stderr := runGW(t, "new", "task")
+	if code != 0 {
+		t.Fatalf("gw new returned %d: %s", code, stderr)
+	}
+	wtPath := strings.TrimSpace(stdout)
+	self := strconv.Itoa(os.Getpid())
+
+	if code, _, stderr := runGW(t, "lock", "task", "--pid", strconv.Itoa(deadPID(t))); code != 1 {
+		t.Fatalf("lock with exited PID returned %d, want 1: %s", code, stderr)
+	}
+	if lockStateFor(wtPath) != nil {
+		t.Fatal("lock with exited PID was recorded")
+	}
+
+	// By branch name.
+	if code, _, stderr := runGW(t, "lock", "task", "--pid", self); code != 0 {
+		t.Fatalf("lock returned %d: %s", code, stderr)
+	}
+	if got := lockStateFor(wtPath); got == nil || !got.Alive || got.PID != os.Getpid() {
+		t.Fatalf("lock state = %+v", got)
+	}
+	// Re-locking with the same PID is allowed; another running PID is not.
+	if code, _, stderr := runGW(t, "lock", wtPath, "--pid", self); code != 0 {
+		t.Fatalf("re-lock with same PID returned %d: %s", code, stderr)
+	}
+	other := strconv.Itoa(runningPID(t))
+	if code, _, _ := runGW(t, "lock", wtPath, "--pid", other); code != 1 {
+		t.Fatalf("lock by another running PID returned %d, want 1", code)
+	}
+
+	// The lock keeps the worktree out of cleanup.
+	result, err := collectResult(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wt := range result.Worktrees {
+		if wt.Path == wtPath && (wt.Cleanup.Recommendation != "keep" || wt.Cleanup.Reasons[0] != "agent_process_running") {
+			t.Fatalf("locked worktree cleanup = %+v", wt.Cleanup)
+		}
+	}
+
+	if code, _, stderr := runGW(t, "unlock", "task"); code != 0 {
+		t.Fatalf("unlock returned %d: %s", code, stderr)
+	}
+	if lockStateFor(wtPath) != nil {
+		t.Fatal("lock remains after unlock")
+	}
+	if code, _, stderr := runGW(t, "unlock", "task"); code != 0 {
+		t.Fatalf("second unlock returned %d: %s", code, stderr)
+	}
+
+	// A lock whose process has exited is stale and can be replaced.
+	if err := writeLock(lockRecord{Path: wtPath, PID: deadPID(t), LockedAt: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := lockStateFor(wtPath); got == nil || got.Alive {
+		t.Fatalf("stale lock state = %+v, want alive=false", got)
+	}
+	if code, _, stderr := runGW(t, "lock", "task", "--pid", other); code != 0 {
+		t.Fatalf("lock over stale lock returned %d: %s", code, stderr)
+	}
+
+	if code, _, _ := runGW(t, "lock", "task"); code != 2 {
+		t.Fatalf("lock without --pid returned %d, want 2", code)
+	}
+	if code, _, _ := runGW(t, "lock", "missing", "--pid", self); code != 1 {
+		t.Fatalf("lock on unknown worktree returned %d, want 1", code)
+	}
+}
+
+func TestMatchTarget(t *testing.T) {
+	records := []worktreeRecord{
+		{Path: "/tmp/repo", Branch: "main"},
+		{Path: "/tmp/a/fix", Branch: "fix-1"},
+		{Path: "/tmp/b/fix", Branch: "fix-2"},
+		{Path: "/tmp/b/other", Branch: "feature/x"},
+	}
+	tests := []struct {
+		query string
+		want  string
+	}{
+		{query: "/tmp/a/fix", want: "/tmp/a/fix"},
+		{query: "feature/x", want: "/tmp/b/other"},
+		{query: "other", want: "/tmp/b/other"},
+		{query: "main", want: "/tmp/repo"},
+	}
+	for _, tt := range tests {
+		got, err := matchTarget(records, tt.query)
+		if err != nil || got.Path != tt.want {
+			t.Fatalf("matchTarget(%q) = %+v, %v; want %s", tt.query, got, err, tt.want)
+		}
+	}
+	if _, err := matchTarget(records, "fix"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous directory name error = %v", err)
+	}
+	if _, err := matchTarget(records, "nope"); err == nil {
+		t.Fatal("unknown worktree matched")
 	}
 }
