@@ -75,13 +75,141 @@ func TestPrintListAlignsColumns(t *testing.T) {
 	}}
 
 	var output bytes.Buffer
-	printList(&output, result)
+	printList(&output, result, false)
 	want := "PATH                                                 BRANCH      GIT    AGENT         CLEANUP\n" +
 		".                                                    main        clean  codex:ended   keep\n" +
 		"/tmp/repository-wt/to-go                             to-go       dirty  unknown       review\n" +
 		".claude/worktrees/codex-hooks-json-structure-0a606c  (detached)  clean  claude:ended  review\n"
 	if output.String() != want {
 		t.Fatalf("printList output =\n%s, want =\n%s", output.String(), want)
+	}
+}
+
+func TestPrintListWithTime(t *testing.T) {
+	commit := "2026-10-30T01:02:03Z"
+	updated := "2026-10-31T04:05:06Z"
+	result := Result{Repository: Repository{Path: "/tmp/repository"}, Worktrees: []Worktree{{
+		Path: "/tmp/repository", Branch: "main",
+		Git:   GitState{Clean: true, LastCommit: commit, UpdatedAt: updated},
+		Agent: AgentState{Lifecycle: "unknown"}, Cleanup: CleanupState{Recommendation: "keep"},
+	}}}
+
+	var output bytes.Buffer
+	printList(&output, result, true)
+	want := "PATH  BRANCH  GIT    AGENT    CLEANUP  COMMIT            UPDATED\n" +
+		fmt.Sprintf(".     main    clean  unknown  keep     %s  %s\n", displayTime(commit), displayTime(updated))
+	if output.String() != want {
+		t.Fatalf("printList output =\n%s, want =\n%s", output.String(), want)
+	}
+}
+
+func TestWorktreeUpdatedAtExcludesIgnoredGitAndDirectoryTimes(t *testing.T) {
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+	gitTestCommand(t, repoPath, "config", "user.email", "test@example.com")
+	gitTestCommand(t, repoPath, "config", "user.name", "Test User")
+	gitTestCommand(t, repoPath, "config", "commit.gpgsign", "false")
+
+	paths := map[string]string{
+		"ignore":    filepath.Join(repoPath, ".gitignore"),
+		"tracked":   filepath.Join(repoPath, "tracked.txt"),
+		"untracked": filepath.Join(repoPath, "untracked\nfile.txt"),
+		"ignored":   filepath.Join(repoPath, "ignored", "build.bin"),
+	}
+	if err := os.WriteFile(paths["ignore"], []byte("ignored/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths["tracked"], []byte("tracked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "add", ".gitignore", "tracked.txt")
+	gitTestCommand(t, repoPath, "commit", "--quiet", "-m", "initial")
+	if err := os.WriteFile(paths["untracked"], []byte("untracked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths["ignored"]), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths["ignored"], []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 1, 2, 3, 4, 0, 0, time.Local)
+	for _, name := range []string{"ignore", "tracked"} {
+		if err := os.Chtimes(paths[name], base, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := base.Add(time.Minute)
+	if err := os.Chtimes(paths["untracked"], want, want); err != nil {
+		t.Fatal(err)
+	}
+	newer := base.Add(2 * time.Minute)
+	if err := os.Chtimes(paths["ignored"], newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(repoPath, ".git", "HEAD"), newer.Add(time.Minute), newer.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(repoPath, newer.Add(2*time.Minute), newer.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := time.Parse(time.RFC3339Nano, worktreeUpdatedAt(repoPath))
+	if err != nil {
+		t.Fatalf("worktreeUpdatedAt returned an invalid timestamp: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("worktreeUpdatedAt = %s, want %s", got, want)
+	}
+}
+
+func TestRunListTimeAddsUpdatedAtToJSON(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	gitTestCommand(t, repoPath, "init", "--quiet")
+	gitTestCommand(t, repoPath, "config", "user.email", "test@example.com")
+	gitTestCommand(t, repoPath, "config", "user.name", "Test User")
+	gitTestCommand(t, repoPath, "config", "commit.gpgsign", "false")
+	gitTestCommand(t, repoPath, "config", "core.fsmonitor", "false")
+	if err := os.WriteFile(filepath.Join(repoPath, "tracked.txt"), []byte("tracked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitTestCommand(t, repoPath, "add", "tracked.txt")
+	gitTestCommand(t, repoPath, "commit", "--quiet", "-m", "initial")
+	t.Chdir(repoPath)
+
+	originalLookPath := lookPath
+	t.Cleanup(func() { lookPath = originalLookPath })
+	lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		wantUpdated bool
+	}{
+		{name: "default", args: []string{"list", "--json"}},
+		{name: "short option and alias", args: []string{"ls", "-t", "--json"}, wantUpdated: true},
+		{name: "long option", args: []string{"list", "--time", "--json"}, wantUpdated: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tt.args, &stdout, &stderr); code != 0 {
+				t.Fatalf("run returned %d: %s", code, stderr.String())
+			}
+			var result struct {
+				Worktrees []struct {
+					Git map[string]any `json:"git"`
+				} `json:"worktrees"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			_, hasUpdated := result.Worktrees[0].Git["updated_at"]
+			if hasUpdated != tt.wantUpdated {
+				t.Fatalf("updated_at present = %t, want %t; JSON:\n%s", hasUpdated, tt.wantUpdated, stdout.String())
+			}
+		})
 	}
 }
 
