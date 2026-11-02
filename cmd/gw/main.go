@@ -84,6 +84,7 @@ type GitState struct {
 	Ahead      *int   `json:"ahead,omitempty"`
 	Behind     *int   `json:"behind,omitempty"`
 	LastCommit string `json:"last_commit_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
 }
 
 type GitHubState struct {
@@ -223,6 +224,9 @@ func runList(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOutput := fs.Bool("json", false, "output JSON")
+	showTime := false
+	fs.BoolVar(&showTime, "time", false, "show commit and worktree update times")
+	fs.BoolVar(&showTime, "t", false, "show commit and worktree update times")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -231,14 +235,14 @@ func runList(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	result, err := collectResult(false)
+	result, err := collectResultWithUpdated(false, showTime)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
 	if *jsonOutput {
 		return writeJSON(stdout, result)
 	}
-	printList(stdout, result)
+	printList(stdout, result, showTime)
 	return 0
 }
 
@@ -411,6 +415,10 @@ func managedSession() bool {
 }
 
 func collectResult(forceGitHubRefresh bool) (Result, error) {
+	return collectResultWithUpdated(forceGitHubRefresh, false)
+}
+
+func collectResultWithUpdated(forceGitHubRefresh, includeUpdated bool) (Result, error) {
 	repoPath, err := gitOutput("rev-parse", "--show-toplevel")
 	if err != nil {
 		return Result{}, fmt.Errorf("not inside a Git repository: %w", err)
@@ -455,6 +463,10 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			gitState := collectGitState(record, mergedPRHead(githubStates[record.Branch]))
+			if includeUpdated {
+				gitState.UpdatedAt = worktreeUpdatedAt(record.Path)
+			}
 			wt := Worktree{
 				Path:     record.Path,
 				Branch:   record.Branch,
@@ -462,7 +474,7 @@ func collectResult(forceGitHubRefresh bool) (Result, error) {
 				Detached: record.Detached,
 				Locked:   record.Locked,
 				Lock:     lockStateFor(record.Path),
-				Git:      collectGitState(record, mergedPRHead(githubStates[record.Branch])),
+				Git:      gitState,
 				GitHub:   githubStates[record.Branch],
 				Agent:    agentForPath(record.Path, sessions),
 			}
@@ -734,6 +746,33 @@ func collectGitState(record worktreeRecord, mergedHead string) GitState {
 		}
 	}
 	return state
+}
+
+// worktreeUpdatedAt returns the newest mtime among files Git knows about:
+// tracked files and untracked, non-ignored files. git ls-files excludes the
+// worktree's .git file/directory and ignored build output from this set.
+func worktreeUpdatedAt(worktreePath string) string {
+	out, err := gitOutputFrom(worktreePath, "-c", "core.fsmonitor=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if err != nil {
+		return ""
+	}
+	var latest time.Time
+	for _, name := range strings.Split(out, "\x00") {
+		if name == "" {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(worktreePath, filepath.FromSlash(name)))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	if latest.IsZero() {
+		return ""
+	}
+	return latest.Format(time.RFC3339Nano)
 }
 
 // unpushedCommits counts commits in HEAD that no remote-tracking branch
@@ -1157,17 +1196,36 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "AI agents: run 'gw guide' for command usage and integration guidance.")
 }
 
-func printList(w io.Writer, result Result) {
+func printList(w io.Writer, result Result, showTime bool) {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PATH\tBRANCH\tGIT\tAGENT\tCLEANUP")
+	if showTime {
+		fmt.Fprintln(tw, "PATH\tBRANCH\tGIT\tAGENT\tCLEANUP\tCOMMIT\tUPDATED")
+	} else {
+		fmt.Fprintln(tw, "PATH\tBRANCH\tGIT\tAGENT\tCLEANUP")
+	}
 	for _, wt := range result.Worktrees {
 		branch := wt.Branch
 		if branch == "" {
 			branch = "(detached)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", displayPath(result.Repository.Path, wt.Path), branch, gitStatus(wt), agentStatus(wt.Agent), wt.Cleanup.Recommendation)
+		if showTime {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", displayPath(result.Repository.Path, wt.Path), branch, gitStatus(wt), agentStatus(wt.Agent), wt.Cleanup.Recommendation, displayTime(wt.Git.LastCommit), displayTime(wt.Git.UpdatedAt))
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", displayPath(result.Repository.Path, wt.Path), branch, gitStatus(wt), agentStatus(wt.Agent), wt.Cleanup.Recommendation)
+		}
 	}
 	_ = tw.Flush()
+}
+
+func displayTime(value string) string {
+	if value == "" {
+		return "-"
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return "-"
+	}
+	return timestamp.Local().Format("2006-01-02 15:04")
 }
 
 func printInspect(w io.Writer, repoPath string, wt Worktree) {
@@ -1198,7 +1256,7 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "gwはGit worktreeの状態を観測し、GitHub PRとエージェントセッションの情報を組み合わせてcleanup候補を判定します。")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "## Commands")
-	fmt.Fprintln(w, "- gw list [--json]")
+	fmt.Fprintln(w, "- gw list [--time] [--json]")
 	fmt.Fprintln(w, "- gw inspect <worktree> [--json]")
 	fmt.Fprintln(w, "- gw refresh [--json]")
 	fmt.Fprintln(w, "- gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
@@ -1230,7 +1288,9 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "GitHubやagent情報が取得できない場合は、値を推測せずunknownまたはunavailableとして扱います。GitHub PR情報は直近30分以内のキャッシュを再利用します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
+		fmt.Fprintln(w, "  -t, --time  COMMIT（最終コミット時刻）とUPDATED（追跡中、およびignoreされていない未追跡ファイルのうち最新の更新時刻）をローカル時刻で表示")
 		fmt.Fprintln(w, "  --json    schema_version、repository、worktrees、sources、errorsを含む構造化出力（詳細は gw guide json）")
+		fmt.Fprintln(w, "  --time --json  各worktreeのgit.updated_atをRFC 3339形式で追加。--timeなしではupdated_atを取得・出力しません")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "個別のworktreeの判定理由まで見たい場合は gw inspect <worktree> を使ってください。")
 	case "inspect":
@@ -1339,7 +1399,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "各worktreeはpath、branch、head、detached、locked（git worktree lock）に加えて次の状態を含みます。")
 		fmt.Fprintln(w, "  lock     gw lockがある場合だけ出力。pid、locked_at、alive（プロセスが生きているか）")
-		fmt.Fprintln(w, "  git      clean/dirty、未コミットのファイル数（uncommitted）、未pushのコミット数（unpushed）、upstreamとの差分、最終コミット時刻")
+		fmt.Fprintln(w, "  git      clean/dirty、未コミットのファイル数（uncommitted）、未pushのコミット数（unpushed）、upstreamとの差分、最終コミット時刻（last_commit_at）")
 		fmt.Fprintln(w, "  github   pull request（先頭コミット head_oid を含む）と取得状態")
 		fmt.Fprintln(w, "  agent    provider、session ID、lifecycle、activity、観測時刻")
 		fmt.Fprintln(w, "  cleanup  recommended/review/keepと判定理由")
@@ -1348,6 +1408,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "worktrees[].github.statusはPR検索結果（found、not_found、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "sources.githubはGitHub PR情報の取得元（gh、cache、unknown、unavailable）を表します。")
 		fmt.Fprintln(w, "取得できない値はnullまたはunknown/unavailableで表現し、推測しません。")
+		fmt.Fprintln(w, "gw list --time --jsonではgit.updated_atを追加します。これは追跡中、およびignoreされていない未追跡ファイルのmtimeの最大値です。.git、ignoredなファイル、worktreeディレクトリ自体のmtimeは含みません。--timeなしでは省略します。")
 		fmt.Fprintln(w, "schema_versionは3です。2からの変更: worktreeにlock、git.uncommitted、git.unpushed、github.pr.head_oidを追加、agent.lifecycleにmanagedを追加、cleanupの判定に未pushのコミットを追加、clean --jsonのremovedをパスの配列からオブジェクトの配列に変更。")
 		fmt.Fprintln(w, "gw new --jsonの結果はschema_version、path、branch、base、createdを含みます（詳細は gw guide new）。")
 		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、planned、removed、skipped、errorsを含みます（詳細は gw guide clean）。")

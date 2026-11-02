@@ -23,6 +23,14 @@ PATH                         BRANCH       GIT    AGENT          CLEANUP
 /path/to/worktree            feature/foo  clean  claude:ended   recommended
 ```
 
+最終コミット時刻と、Gitが把握しているファイルの最終更新時刻を確認するには `--time`（`-t`）を付けます。`UPDATED` は追跡中のファイルと、ignoreされていない未追跡ファイルのmtimeのうち最新のものです。ignoredな生成物、`.git`、worktreeディレクトリ自体のmtimeは含みません。時刻はローカル時刻で表示します。
+
+```console
+$ gw list --time
+PATH                 BRANCH       GIT    AGENT   CLEANUP  COMMIT            UPDATED
+/path/to/repository  main         clean  unknown  keep     2026-10-30 12:34  2026-10-31 09:15
+```
+
 個別の worktree を詳しく確認するには、`inspect` を使います。引数を省略するとメイン worktree を表示します。
 
 ```console
@@ -66,6 +74,7 @@ $ gw clean fix-login --force --force
 
 ```console
 $ gw list --json
+$ gw list --time --json
 $ gw inspect feature/foo --json
 $ gw clean --dry-run --json
 ```
@@ -88,6 +97,8 @@ JSON の `worktrees[].github.status` は、worktreeごとのPR検索結果を表
 以前のキャッシュにある`available`は、PRの有無に応じて`found`または`not_found`へ読み替えます。
 
 JSONの `schema_version` は `3` です。`2` からの主な変更は、`gw lock` の状態（`lock`）、未コミットのファイル数と push していないコミット数（`git.uncommitted`、`git.unpushed`）、PR の先頭コミット（`github.pr.head_oid`）の追加と、`clean --json` の `removed` をパスの配列からオブジェクトの配列に変えたことです。詳細は `gw guide json` と `gw guide clean` で確認できます。
+
+`gw list --time --json` では、各worktreeの `git.updated_at` をRFC 3339形式で追加します。`--time` なしでは更新時刻の走査を行わず、このフィールドも出力しません。
 
 ### 外部ツールから起動する場合
 
