@@ -42,11 +42,17 @@ $ gw inspect feature/foo
 
 ```console
 $ gw new fix-login
-/home/user/.local/share/gw/worktrees/repository/fix-login
+/home/user/.local/share/gw/worktrees/repository/fix-login/repository
+$ gw new
+/home/user/.local/share/gw/worktrees/repository/quiet-river-a1b2c3d4/repository
 $ gw new fix-login --base origin/develop --branch feature/login --json
 ```
 
-配置先は `<root>/<repo>/<名前>` です。`<root>` は `--root`、環境変数 `GW_WORKTREE_ROOT`、`${XDG_DATA_HOME:-~/.local/share}/gw/worktrees` の順に決まります。同じ名前の worktree が既にあれば、作り直さずにそのパスを返します。既存のブランチ名を指定した場合や、配置先が別のものと衝突する場合は失敗します。失敗の種類ごとの終了コードは `gw guide new` で確認できます。
+配置先は `<root>/<repo>/<名前>/<repo>` です。`<repo>` はメイン worktree のディレクトリ名で、作成元が別の worktree でも変わりません。`<root>` は `--root`、環境変数 `GW_WORKTREE_ROOT`、`${XDG_DATA_HOME:-~/.local/share}/gw/worktrees` の順に決まります。
+
+名前を省略すると、英単語2つと時刻の短いハッシュで名前を決め、既定ではブランチ名にも使います。ブランチや配置先が衝突した場合は、1秒待って名前を再生成し、1回だけ再試行します（初回込みで最大2回）。自動命名では既存の worktree を再利用しません。`--branch` で指定したブランチの衝突は再試行せず失敗します。`--json` の出力には、決まった名前を `name` として含めます。
+
+名前を明示し、同じ配置先に同じブランチの worktree が既にあれば、作り直さずにそのパスを返します。既存のブランチ名を指定した場合や、配置先が別のものと衝突する場合は失敗します。失敗の種類ごとの終了コードは `gw guide new` で確認できます。旧形式の `<root>/<repo>/<名前>` も引き続き list・inspect・clean できます。
 
 削除候補は、まず dry-run で確認できます。
 
@@ -68,7 +74,7 @@ $ gw clean fix-login --force --force
 
 既定では、worktree と一緒にローカルブランチも削除します。ブランチを残したい場合は `--save-branch` を付けます。削除したブランチの先頭コミット ID を表示するので、`git branch <ブランチ名> <コミットID>` で戻せます。`--dry-run` では、削除で失われるもの（未コミットのファイル数、push していないコミット数、PR の状態）を確認できます。
 
-削除時は Git の worktree 登録と実体ディレクトリを、ignored なビルド生成物も含めて強制的に削除します。削除に失敗した場合は Git のエラー理由を表示し、終了コード1を返します。
+削除時は Git の worktree 登録と実体ディレクトリを、ignored なビルド生成物も含めて強制的に削除します。新形式では空になった `<名前>` ディレクトリも削除し、その親の `<repo>` も空になれば削除します。削除に失敗した場合は Git のエラー理由を表示し、終了コード1を返します。
 
 他のツールから利用する場合は、`--json` を付けると構造化された結果を取得できます。
 

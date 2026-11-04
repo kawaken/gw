@@ -266,7 +266,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() == 1 {
 		query = fs.Arg(0)
 	}
-	selected, err := resolveWorktree(result.Worktrees, query)
+	selected, err := resolveWorktree(result.Worktrees, query, result.mainPath)
 	if err != nil {
 		return printCommandError(stderr, err)
 	}
@@ -867,13 +867,20 @@ func agentForPath(path string, sessions []sessionRecord) AgentState {
 	}
 }
 
-func resolveWorktree(worktrees []Worktree, query string) (Worktree, error) {
+func resolveWorktree(worktrees []Worktree, query, mainPath string) (Worktree, error) {
 	if query == "" || query == "main" {
-		return worktrees[0], nil
+		query = mainPath
 	}
-	absQuery := mustAbs(query)
+	records := make([]worktreeRecord, 0, len(worktrees))
 	for _, wt := range worktrees {
-		if wt.Path == absQuery || filepath.Base(wt.Path) == query {
+		records = append(records, worktreeRecord{Path: wt.Path, Branch: wt.Branch})
+	}
+	record, err := matchTarget(records, query)
+	if err != nil {
+		return Worktree{}, err
+	}
+	for _, wt := range worktrees {
+		if wt.Path == record.Path {
 			return wt, nil
 		}
 	}
@@ -1109,6 +1116,10 @@ func removeWorktree(repoPath, worktreePath string) error {
 // passing --force twice when unlockGit is set so a git-locked worktree is
 // removed too.
 func removeWorktreeWith(repoPath, worktreePath string, unlockGit bool) error {
+	records, err := gitWorktrees(repoPath)
+	if err != nil {
+		return err
+	}
 	args := []string{"worktree", "remove", "--force"}
 	if unlockGit {
 		args = append(args, "--force")
@@ -1124,11 +1135,16 @@ func removeWorktreeWith(repoPath, worktreePath string, unlockGit bool) error {
 	if verifyErr != nil {
 		return verifyErr
 	}
-	// Worktrees made by gw new live in <root>/<repo>/<name>; drop the <repo>
-	// directory once its last worktree is gone.
-	if root, err := worktreeRoot(""); err == nil {
-		removeEmptyRepoDir(root, worktreePath)
+	root, _ := worktreeRoot("")
+	if len(records) > 0 {
+		repoName := filepath.Base(records[0].Path)
+		parent := filepath.Dir(worktreePath)
+		if filepath.Base(worktreePath) == repoName && filepath.Base(filepath.Dir(parent)) == repoName {
+			// Infer the root for the new layout, including worktrees made with --root.
+			root = filepath.Dir(filepath.Dir(parent))
+		}
 	}
+	removeEmptyRepoDir(root, worktreePath)
 	return nil
 }
 
@@ -1259,7 +1275,7 @@ func printGuideOverview(w io.Writer) {
 	fmt.Fprintln(w, "- gw list [--time] [--json]")
 	fmt.Fprintln(w, "- gw inspect <worktree> [--json]")
 	fmt.Fprintln(w, "- gw refresh [--json]")
-	fmt.Fprintln(w, "- gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
+	fmt.Fprintln(w, "- gw new [<name>] [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
 	fmt.Fprintln(w, "- gw lock <worktree> --pid <pid>")
 	fmt.Fprintln(w, "- gw unlock <worktree>")
 	fmt.Fprintln(w, "- gw clean --dry-run [--json]")
@@ -1310,18 +1326,19 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --json    gw list --json と同じResult構造で出力")
 	case "new":
-		fmt.Fprintln(w, "# gw new <name>")
+		fmt.Fprintln(w, "# gw new [<name>]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "現在のリポジトリに、<name>と同名の新規ブランチでworktreeを作成し、パスだけを出力します。作成前にベースのリモートをfetchします（失敗した場合は警告してローカルのrefを使います）。")
-		fmt.Fprintln(w, "配置先は <root>/<repo>/<name> です。<repo>はメインworktreeのディレクトリ名、<root>は --root、GW_WORKTREE_ROOT、${XDG_DATA_HOME:-~/.local/share}/gw/worktrees の順に決まります。")
+		fmt.Fprintln(w, "名前を省略すると、英単語2つと時刻の短いハッシュ（quiet-river-a1b2c3d4 など）で名前を決めます。ブランチや配置先が衝突した場合は1秒待って新しい名前で1回だけ再試行します（初回込みで最大2回）。自動命名では既存worktreeを再利用しません。--branchで指定したブランチの衝突は再試行せず失敗します。")
+		fmt.Fprintln(w, "配置先は <root>/<repo>/<name>/<repo> です。<repo>はメインworktreeのディレクトリ名、<root>は --root、GW_WORKTREE_ROOT、${XDG_DATA_HOME:-~/.local/share}/gw/worktrees の順に決まります。")
 		fmt.Fprintln(w, "新しいブランチはベースを追跡しません（最初のpushで自分のupstreamを設定してください）。")
-		fmt.Fprintln(w, "同じ配置先に同じブランチのworktreeが既にあれば、作り直さずにそのパスを返します（created: false）。")
+		fmt.Fprintln(w, "名前を明示し、同じ配置先に同じブランチのworktreeが既にあれば、作り直さずにそのパスを返します（created: false）。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Options:")
 		fmt.Fprintln(w, "  --base <ref>       ブランチの起点（既定: origin/main）")
 		fmt.Fprintln(w, "  --branch <branch>  ブランチ名（既定: <name>）")
 		fmt.Fprintln(w, "  --root <dir>       配置先のルート（既定: GW_WORKTREE_ROOT、なければ ${XDG_DATA_HOME:-~/.local/share}/gw/worktrees）")
-		fmt.Fprintln(w, "  --json             schema_version、path、branch、base、created を出力（既存のworktreeを返した場合baseは省略）")
+		fmt.Fprintln(w, "  --json             schema_version、name、path、branch、base、created を出力（既存のworktreeを返した場合baseは省略）")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "<name>には / や \\ や .. を含められません。")
 		fmt.Fprintln(w, "終了コード:")
@@ -1333,7 +1350,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "  5  ブランチが既に存在する、または別のworktreeでチェックアウト中")
 		fmt.Fprintln(w, "  6  配置先が既に存在する（別ブランチのworktree、worktreeでないディレクトリなど）")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "gw cleanでこの配置先のworktreeを削除し、<repo>ディレクトリが空になった場合は<repo>ディレクトリも削除します。")
+		fmt.Fprintln(w, "gw cleanでは、空になった<name>ディレクトリも削除し、その親の<repo>も空になれば削除します。旧形式の <root>/<repo>/<name> も引き続きlist・inspect・cleanできます。")
 	case "lock":
 		fmt.Fprintln(w, "# gw lock <worktree> --pid <pid> / gw unlock <worktree>")
 		fmt.Fprintln(w)
@@ -1346,7 +1363,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "unlock: lockを削除します。lockがなくても成功します。")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "外部ツールからの使い方:")
-		fmt.Fprintln(w, "  1. gw new <name> でworktreeを作成")
+		fmt.Fprintln(w, "  1. gw new [<name>] でworktreeを作成")
 		fmt.Fprintln(w, "  2. 環境変数 GW_MANAGED=1 を付けてエージェントのCLIを起動し、gw lock <worktree> --pid <CLIのPID>")
 		fmt.Fprintln(w, "  3. CLIの終了後に gw unlock <worktree>")
 		fmt.Fprintln(w)
@@ -1410,7 +1427,7 @@ func printGuideTopic(w io.Writer, topic string) {
 		fmt.Fprintln(w, "取得できない値はnullまたはunknown/unavailableで表現し、推測しません。")
 		fmt.Fprintln(w, "gw list --time --jsonではgit.updated_atを追加します。これは追跡中、およびignoreされていない未追跡ファイルのmtimeの最大値です。.git、ignoredなファイル、worktreeディレクトリ自体のmtimeは含みません。--timeなしでは省略します。")
 		fmt.Fprintln(w, "schema_versionは3です。2からの変更: worktreeにlock、git.uncommitted、git.unpushed、github.pr.head_oidを追加、agent.lifecycleにmanagedを追加、cleanupの判定に未pushのコミットを追加、clean --jsonのremovedをパスの配列からオブジェクトの配列に変更。")
-		fmt.Fprintln(w, "gw new --jsonの結果はschema_version、path、branch、base、createdを含みます（詳細は gw guide new）。")
+		fmt.Fprintln(w, "gw new --jsonの結果はschema_version、name、path、branch、base、createdを含みます（詳細は gw guide new）。")
 		fmt.Fprintln(w, "clean --jsonの結果はschema_version、repository、mode、candidates、planned、removed、skipped、errorsを含みます（詳細は gw guide clean）。")
 	}
 }

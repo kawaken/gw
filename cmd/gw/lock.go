@@ -105,7 +105,7 @@ func resolveTargetRecord(query string) (worktreeRecord, error) {
 }
 
 // matchTarget matches query against worktree paths first, then branch names,
-// then directory names. A directory name shared by several worktrees is
+// then worktree names. A name shared by several worktrees is
 // rejected as ambiguous.
 func matchTarget(records []worktreeRecord, query string) (worktreeRecord, error) {
 	if query == "" {
@@ -125,7 +125,11 @@ func matchTarget(records []worktreeRecord, query string) (worktreeRecord, error)
 	}
 	var matches []worktreeRecord
 	for _, record := range records {
-		if filepath.Base(record.Path) == query {
+		name := filepath.Base(record.Path)
+		if filepath.Base(filepath.Dir(filepath.Dir(record.Path))) == name {
+			name = filepath.Base(filepath.Dir(record.Path))
+		}
+		if name == query {
 			matches = append(matches, record)
 		}
 	}

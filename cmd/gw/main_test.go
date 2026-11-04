@@ -816,7 +816,7 @@ func TestRunNewCreatesWorktreeUnderRoot(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("gw new returned %d: %s", code, stderr)
 	}
-	want := resolvePath(filepath.Join(root, "myrepo", "fix-a"))
+	want := resolvePath(filepath.Join(root, "myrepo", "fix-a", "myrepo"))
 	if strings.TrimSpace(stdout) != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -846,7 +846,7 @@ func TestRunNewCreatesWorktreeUnderRoot(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
 	}
-	if result.Created || result.Path != want || result.Branch != "fix-a" || result.SchemaVersion != schemaVersion {
+	if result.Created || result.Name != "fix-a" || result.Path != want || result.Branch != "fix-a" || result.SchemaVersion != schemaVersion {
 		t.Fatalf("second gw new result = %+v", result)
 	}
 
@@ -854,8 +854,10 @@ func TestRunNewCreatesWorktreeUnderRoot(t *testing.T) {
 	if err := removeWorktree(repoPath, want); err != nil {
 		t.Fatalf("removeWorktree returned error: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Dir(want)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("repo directory still exists, err = %v", err)
+	for _, dir := range []string{filepath.Dir(want), filepath.Dir(filepath.Dir(want))} {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("parent directory %s still exists, err = %v", dir, err)
+		}
 	}
 }
 
@@ -872,7 +874,7 @@ func TestRunNewJSONWithBranchAndBase(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
 	}
-	want := NewResult{SchemaVersion: schemaVersion, Path: resolvePath(filepath.Join(root, "myrepo", "task-1")), Branch: "feature/x", Base: "main", Created: true}
+	want := NewResult{SchemaVersion: schemaVersion, Name: "task-1", Path: resolvePath(filepath.Join(root, "myrepo", "task-1", "myrepo")), Branch: "feature/x", Base: "main", Created: true}
 	if result != want {
 		t.Fatalf("result = %+v, want %+v", result, want)
 	}
@@ -889,7 +891,7 @@ func TestRunNewDefaultRootUsesXDGDataHome(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("gw new returned %d: %s", code, stderr)
 	}
-	want := resolvePath(filepath.Join(dataHome, "gw", "worktrees", "myrepo", "fix-b"))
+	want := resolvePath(filepath.Join(dataHome, "gw", "worktrees", "myrepo", "fix-b", "myrepo"))
 	if strings.TrimSpace(stdout) != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -913,7 +915,7 @@ func TestRunNewFailures(t *testing.T) {
 		args []string
 		code int
 	}{
-		{name: "no name", args: []string{"new"}, code: 2},
+		{name: "too many names", args: []string{"new", "one", "two"}, code: 2},
 		{name: "slash", args: []string{"new", "a/b"}, code: exitNewInvalidName},
 		{name: "dot dot", args: []string{"new", "a..b"}, code: exitNewInvalidName},
 		{name: "invalid branch", args: []string{"new", "ok", "--branch", "bad branch"}, code: exitNewInvalidName},
