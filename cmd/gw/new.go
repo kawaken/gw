@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,8 +29,14 @@ const defaultNewBase = "origin/main"
 // execTimeout.
 var longExecTimeout = 2 * time.Minute
 
+var (
+	makeWorktreeName = randomWorktreeName
+	waitForNameRetry = time.Sleep
+)
+
 type NewResult struct {
 	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
 	Path          string `json:"path"`
 	Branch        string `json:"branch"`
 	Base          string `json:"base,omitempty"`
@@ -58,12 +66,17 @@ func runNew(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return 2
 	}
-	if len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: gw new <name> [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
+	if len(positional) > 1 {
+		fmt.Fprintln(stderr, "usage: gw new [<name>] [--base <ref>] [--branch <branch>] [--root <dir>] [--json]")
 		return 2
 	}
 
-	result, err := createWorktree(positional[0], *branch, *base, *root, stderr)
+	var result NewResult
+	if len(positional) == 0 {
+		result, err = createAutoWorktree(*branch, *base, *root, stderr)
+	} else {
+		result, err = createWorktree(positional[0], *branch, *base, *root, stderr)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gw new: %v\n", err)
 		var ne *newError
@@ -77,6 +90,57 @@ func runNew(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, result.Path)
 	return 0
+}
+
+func createAutoWorktree(branch, base, root string, stderr io.Writer) (NewResult, error) {
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			waitForNameRetry(time.Second)
+		}
+		result, err := createWorktree(makeWorktreeName(), branch, base, root, stderr)
+		if err == nil {
+			if result.Created {
+				return result, nil
+			}
+			// A generated name must never reuse another caller's worktree.
+			err = newFailure(exitNewPathConflict, "%s already exists as a worktree", result.Path)
+		}
+		var ne *newError
+		if attempt == 1 || !errors.As(err, &ne) ||
+			(ne.code != exitNewPathConflict && (ne.code != exitNewBranchConflict || branch != "")) {
+			return NewResult{}, err
+		}
+	}
+}
+
+func randomWorktreeName() string {
+	adjective := worktreeAdjectives[rand.IntN(len(worktreeAdjectives))]
+	noun := worktreeNouns[rand.IntN(len(worktreeNouns))]
+	words := adjective + "-" + noun
+	digest := sha256.Sum256(fmt.Appendf(nil, "%s-%d", words, time.Now().UnixNano()))
+	return fmt.Sprintf("%s-%x", words, digest[:4])
+}
+
+var worktreeAdjectives = [...]string{
+	"amber", "ancient", "autumn", "azure", "bold", "brave", "bright", "brisk",
+	"calm", "clever", "cobalt", "cool", "dusky", "cosmic", "crisp", "curious",
+	"dawn", "deep", "eager", "early", "fair", "fancy", "fresh", "gentle",
+	"golden", "grand", "green", "happy", "hidden", "humble", "ivory", "jolly",
+	"keen", "kind", "late", "light", "lively", "lucky", "lunar", "mellow",
+	"merry", "misty", "noble", "olive", "pale", "patient", "plain", "polar",
+	"proud", "quick", "quiet", "rapid", "rustic", "silent", "silver", "simple",
+	"smooth", "solar", "spare", "steady", "sunny", "swift", "tidy", "warm",
+}
+
+var worktreeNouns = [...]string{
+	"anchor", "aspen", "badger", "beacon", "birch", "breeze", "brook", "canyon",
+	"cedar", "cliff", "cloud", "comet", "coral", "crane", "creek", "delta",
+	"dune", "ember", "falcon", "fern", "field", "finch", "fjord", "forest",
+	"fox", "garden", "glacier", "grove", "harbor", "hawk", "heron", "hill",
+	"island", "lake", "lantern", "maple", "meadow", "mesa", "moon", "moss",
+	"oak", "orchid", "otter", "owl", "pebble", "pine", "planet", "pond",
+	"prairie", "rain", "raven", "reef", "ridge", "river", "robin", "sparrow",
+	"spruce", "star", "stone", "summit", "thistle", "tide", "valley", "willow",
 }
 
 func createWorktree(name, branch, base, root string, stderr io.Writer) (NewResult, error) {
@@ -114,7 +178,9 @@ func createWorktree(name, branch, base, root string, stderr io.Writer) (NewResul
 	}
 	// Git records worktree paths with symlinks resolved, so resolve ours the
 	// same way before comparing (e.g. /var vs /private/var on macOS).
-	target := resolvePath(filepath.Join(rootDir, filepath.Base(mainPath), name))
+	repoName := filepath.Base(mainPath)
+	nameDir := resolvePath(filepath.Join(rootDir, repoName, name))
+	target := filepath.Join(nameDir, repoName)
 	rootDir = resolvePath(rootDir)
 
 	for _, record := range records {
@@ -127,10 +193,10 @@ func createWorktree(name, branch, base, root string, stderr io.Writer) (NewResul
 		if record.Branch != branch {
 			return NewResult{}, newFailure(exitNewPathConflict, "%s already exists as a worktree for branch %q", target, valueOr(record.Branch, "(detached)"))
 		}
-		return NewResult{SchemaVersion: schemaVersion, Path: target, Branch: branch, Created: false}, nil
+		return NewResult{SchemaVersion: schemaVersion, Name: name, Path: target, Branch: branch, Created: false}, nil
 	}
-	if _, err := os.Lstat(target); err == nil {
-		return NewResult{}, newFailure(exitNewPathConflict, "%s already exists and is not a worktree of this repository", target)
+	if _, err := os.Lstat(nameDir); err == nil {
+		return NewResult{}, newFailure(exitNewPathConflict, "%s already exists and is not the requested worktree", nameDir)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return NewResult{}, err
 	}
@@ -160,9 +226,16 @@ func createWorktree(name, branch, base, root string, stderr io.Writer) (NewResul
 	// so the first push sets its own upstream.
 	if err := gitRunTimeout(cwdRepo, longExecTimeout, "worktree", "add", "--quiet", "--no-track", "-b", branch, target, base); err != nil {
 		removeEmptyRepoDir(rootDir, target)
+		// Another caller may have created the same branch or path after our checks.
+		if _, pathErr := os.Lstat(target); pathErr == nil {
+			return NewResult{}, newFailure(exitNewPathConflict, "git worktree add: %v", err)
+		}
+		if _, branchErr := gitOutputFrom(cwdRepo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); branchErr == nil {
+			return NewResult{}, newFailure(exitNewBranchConflict, "git worktree add: %v", err)
+		}
 		return NewResult{}, fmt.Errorf("git worktree add: %w", err)
 	}
-	return NewResult{SchemaVersion: schemaVersion, Path: target, Branch: branch, Base: base, Created: true}, nil
+	return NewResult{SchemaVersion: schemaVersion, Name: name, Path: target, Branch: branch, Base: base, Created: true}, nil
 }
 
 // validateWorktreeName rejects names that would escape or nest inside the
@@ -222,17 +295,23 @@ func remoteOfRef(repoPath, ref string) string {
 	return best
 }
 
-// removeEmptyRepoDir removes the <repo> directory that held worktreePath when
-// it sits directly under root and has become empty. Anything else is left
-// alone.
+// removeEmptyRepoDir removes empty parents of either <root>/<repo>/<name>/<repo>
+// or the legacy <root>/<repo>/<name>. It never removes root or nonempty parents.
 func removeEmptyRepoDir(root, worktreePath string) {
-	repoDir := resolvePath(filepath.Dir(mustAbs(worktreePath)))
-	if root == "" || filepath.Dir(repoDir) != resolvePath(root) {
+	if root == "" {
 		return
 	}
-	entries, err := os.ReadDir(repoDir)
-	if err != nil || len(entries) != 0 {
-		return
+	root = resolvePath(root)
+	parent := resolvePath(filepath.Dir(mustAbs(worktreePath)))
+	repoDir := parent
+	if filepath.Dir(repoDir) != root {
+		repoDir = filepath.Dir(parent)
+		if filepath.Dir(repoDir) != root || filepath.Base(worktreePath) != filepath.Base(repoDir) {
+			return
+		}
+		if err := os.Remove(parent); err != nil {
+			return
+		}
 	}
 	_ = os.Remove(repoDir)
 }
